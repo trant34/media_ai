@@ -8,7 +8,11 @@
 #   GATEWAY_HOST=127.0.0.1   GATEWAY_PORT=8080   METRICS_PORT=9090
 #
 # Requires: curl (với nghttp2), python3
-# Kiểm tra curl có HTTP/2: curl --version | grep HTTP2
+#
+# HTTP/2 mode detection (tự động):
+#   --http2-prior-knowledge  gửi h2c trực tiếp (không upgrade)
+#   --http2                  dùng HTTP Upgrade: h2c (RedHat/CentOS curl)
+#   fallback HTTP/1.1        nếu curl không có HTTP/2
 
 set -euo pipefail
 
@@ -43,16 +47,30 @@ info "Preflight checks"
 command -v curl   >/dev/null 2>&1 || fail "curl not found"
 command -v python3 >/dev/null 2>&1 || fail "python3 not found"
 
-# Kiểm tra curl có hỗ trợ HTTP/2
+# Detect HTTP/2 mode của curl
+# Ưu tiên: --http2-prior-knowledge > --http2 > HTTP/1.1 fallback
+#
+#   --http2-prior-knowledge : gửi h2c trực tiếp (curl 7.49+, cần nghttp2)
+#   --http2                 : HTTP Upgrade h2c (RedHat/CentOS curl thường dùng flag này)
+#   (none)                  : HTTP/1.1 fallback
 if ! curl --version 2>&1 | grep -qi "HTTP2\|nghttp2"; then
-    warn "curl không có HTTP/2 support (thiếu nghttp2)"
-    warn "Cài: apt install libnghttp2-dev  hoặc  yum install libnghttp2"
+    warn "curl không có HTTP/2 support"
+    warn "RedHat/CentOS: dnf install libnghttp2  hoặc  yum install libnghttp2"
+    warn "Ubuntu/Debian: apt install libnghttp2-dev"
     warn "Fallback sang HTTP/1.1..."
     H2_FLAG=""
-else
-    ok "curl hỗ trợ HTTP/2"
+    H2_MODE="HTTP/1.1 (fallback)"
+elif curl --http2-prior-knowledge --version >/dev/null 2>&1 \
+     && curl -s --http2-prior-knowledge "http://${GW_HOST}:${GW_PORT}/health/live" >/dev/null 2>&1; then
+    ok "curl hỗ trợ --http2-prior-knowledge (h2c direct)"
     H2_FLAG="--http2-prior-knowledge"
+    H2_MODE="h2c prior-knowledge"
+else
+    ok "curl hỗ trợ --http2 (HTTP Upgrade h2c)"
+    H2_FLAG="--http2"
+    H2_MODE="h2c upgrade"
 fi
+info "HTTP/2 mode: ${H2_MODE}"
 
 # Hàm curl với h2c
 h2curl() {
@@ -231,7 +249,7 @@ info "  rtp_ports_available after delete: ${PORTS_FINAL}"
 # ── Summary ───────────────────────────────────────────────────────────────────
 sep
 echo -e "${BOLD}Summary${NC}"
-echo -e "  Gateway          : ${GW_BASE}  (HTTP/${HTTP_VER:-1.1})"
+echo -e "  Gateway          : ${GW_BASE}  (${H2_MODE})"
 echo -e "  Session ID       : ${SESSION_ID}"
 echo -e "  RTP endpoint     : ${RTP_IP}:${RTP_PORT}"
 echo -e "  Packets sent     : ${RTP_PACKETS}"
