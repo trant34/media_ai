@@ -12,11 +12,11 @@ import (
 //   wire 0x00 → +32124 (maximum positive amplitude)
 //   wire 0x80 → -32124 (maximum negative amplitude)
 //
-// PCMA (A-law):
-//   wire 0xD5 → 0     (positive silence)
-//   wire 0x55 → 0     (negative silence)
-//   wire 0xAA → +32124 (maximum positive amplitude)
-//   wire 0x2A → -32124 (maximum negative amplitude)
+// PCMA (A-law) — ITU-T G.711, step-size formula differs from µ-law:
+//   wire 0xD5 → +8    (positive silence: exp=0, mantissa=0 → 0×16+8=8)
+//   wire 0x55 → -8    (negative silence)
+//   wire 0xAA → +32256 (maximum positive: exp=7, mantissa=15 → (15×16+264)<<6=32256)
+//   wire 0x2A → -32256 (maximum negative)
 
 func TestDecodeUlaw_KnownValues(t *testing.T) {
 	cases := []struct {
@@ -41,10 +41,10 @@ func TestDecodeAlaw_KnownValues(t *testing.T) {
 		wire byte
 		want int16
 	}{
-		{0xD5, 0},     // positive silence
-		{0x55, 0},     // negative silence
-		{0xAA, 32124}, // max positive
-		{0x2A, -32124}, // max negative
+		{0xD5, 8},      // positive silence (exp=0, mantissa=0 → 8)
+		{0x55, -8},     // negative silence
+		{0xAA, 32256},  // max positive (exp=7, mantissa=15 → (240+264)<<6=32256)
+		{0x2A, -32256}, // max negative
 	}
 	for _, c := range cases {
 		got := decodeAlaw(c.wire)
@@ -145,7 +145,8 @@ func TestDecode_PCMU_Silence(t *testing.T) {
 
 func TestDecode_PCMA_Silence(t *testing.T) {
 	d, _ := New("PCMA", 8000, 1)
-	// A-law positive silence = 0xD5.
+	// A-law positive silence = 0xD5 → decodes to +8 (smallest quantization step).
+	// µ-law silence (0xFF) decodes to exactly 0; A-law silence does not.
 	payload := make([]byte, 160)
 	for i := range payload {
 		payload[i] = 0xD5
@@ -155,8 +156,8 @@ func TestDecode_PCMA_Silence(t *testing.T) {
 		t.Fatalf("Decode: %v", err)
 	}
 	for i, s := range pcm {
-		if s != 0 {
-			t.Errorf("pcm[%d] = %d, want 0", i, s)
+		if s != 8 {
+			t.Errorf("pcm[%d] = %d, want 8 (A-law silence)", i, s)
 			break
 		}
 	}

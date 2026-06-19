@@ -56,13 +56,20 @@ func decodeUlaw(wire byte) int16 {
 //  1. XOR với 0x55 để đảo các bit chẵn, lấy codeword gốc.
 //  2. Bit 7 = sign (1 = dương, 0 = âm).
 //  3. Bits 6-4 = exponent, bits 3-0 = mantissa.
-//  4. magnitude = expLut[exp] + mantissa << (exp + 3).
+//  4. exp=0: magnitude = mantissa×16 + 8
+//     exp≥1: magnitude = (mantissa×16 + 264) << (exp−1)
+//  (khác µ-law: A-law dùng step size 16, bias 264=132×2 mỗi segment)
 func decodeAlaw(wire byte) int16 {
 	a := wire ^ 0x55
 	sign := a & 0x80
 	exp := (a & 0x70) >> 4
 	mantissa := a & 0x0f
-	mag := expLut[exp] + int32(mantissa)<<(uint(exp)+3)
+	var mag int32
+	if exp == 0 {
+		mag = int32(mantissa)*16 + 8
+	} else {
+		mag = (int32(mantissa)*16 + 264) << (uint(exp) - 1)
+	}
 	if sign != 0 {
 		return int16(mag)
 	}

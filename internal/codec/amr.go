@@ -61,6 +61,9 @@ type amrDecoder struct {
 }
 
 func newAMRDecoder(variant amrVariant, sampleRate, channels int) (Decoder, error) {
+	if variant == amrWB {
+		return newAMRWBDecoder(sampleRate, channels)
+	}
 	return &amrDecoder{variant: variant, sampleRate: sampleRate, channels: channels}, nil
 }
 

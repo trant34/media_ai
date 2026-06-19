@@ -2,6 +2,8 @@
 
 ## Tổng quan
 
+### Test cơ bản (lab-rtp-test.sh)
+
 ```
 [lab-rtp-test.sh]
       │  HTTP/2  POST /v1/sessions
@@ -12,6 +14,21 @@
       ▼
 [mock-ai-worker :50051]
       └─ partial mỗi 3 AudioChunk (~1.5s), final mỗi 6 AudioChunk (~3s)
+```
+
+### Test callback E2E (test-rtp-callback.sh)
+
+```
+[test-rtp-callback.sh]
+      │  POST /v1/sessions  (+ callback_url)
+      │  UDP RTP packets
+      ▼
+[media-ai-gateway :8080]
+      │  gRPC  →  mock-ai-worker :50051
+      │  HTTP/2 POST callback
+      ▼
+[mock-callback-server :9999]   ← Go binary, built-in H2C server
+      └─ log {"event":"callback",...} ra stdout
 ```
 
 **Pipeline audio (PCMU 8kHz → 16kHz):**
@@ -31,8 +48,9 @@
 New-Item -ItemType Directory -Force bin | Out-Null
 
 $env:GOOS="linux"; $env:GOARCH="amd64"
-go build -mod=vendor -o bin/media-ai-gateway ./cmd/media-ai-gateway
-go build -mod=vendor -o bin/mock-ai-worker   ./cmd/mock-ai-worker
+go build -mod=vendor -o bin/media-ai-gateway    ./cmd/media-ai-gateway
+go build -mod=vendor -o bin/mock-ai-worker      ./cmd/mock-ai-worker
+go build -mod=vendor -o bin/mock-callback-server ./cmd/mock-callback-server
 Remove-Item Env:\GOOS, Env:\GOARCH
 ```
 
@@ -41,21 +59,24 @@ Remove-Item Env:\GOOS, Env:\GOARCH
 ```bash
 # Yêu cầu Go >= 1.22 đã cài trên lab
 cd ~/media-ai/src
-go build -mod=vendor -o ../bin/media-ai-gateway ./cmd/media-ai-gateway
-go build -mod=vendor -o ../bin/mock-ai-worker   ./cmd/mock-ai-worker
+go build -mod=vendor -o ../bin/media-ai-gateway    ./cmd/media-ai-gateway
+go build -mod=vendor -o ../bin/mock-ai-worker      ./cmd/mock-ai-worker
+go build -mod=vendor -o ../bin/mock-callback-server ./cmd/mock-callback-server
 ```
 
----
+---c
 
 ## Bước 2 — Copy lên lab server
 
 ```bash
 # Chạy từ máy Windows (điều chỉnh USER và LAB_IP)
 LAB="USER@LAB_IP"
-scp bin/media-ai-gateway       $LAB:~/media-ai/
-scp bin/mock-ai-worker         $LAB:~/media-ai/
-scp config/gateway-mock.yaml   $LAB:~/media-ai/
-scp scripts/lab-rtp-test.sh    $LAB:~/media-ai/
+scp bin/media-ai-gateway        $LAB:~/media-ai/
+scp bin/mock-ai-worker          $LAB:~/media-ai/
+scp bin/mock-callback-server    $LAB:~/media-ai/
+scp config/gateway-mock.yaml    $LAB:~/media-ai/
+scp scripts/lab-rtp-test.sh     $LAB:~/media-ai/
+scp scripts/test-rtp-callback.sh $LAB:~/media-ai/
 ```
 
 ---
@@ -151,6 +172,62 @@ chmod +x lab-rtp-test.sh
 
 ---
 
+## Bước 6 — Callback E2E Test (test-rtp-callback.sh)
+
+Kiểm tra toàn bộ pipeline bao gồm chiều trả về: gateway gửi kết quả ASR về client qua HTTP/2 POST.
+
+### Yêu cầu
+
+- `mock-callback-server` đã build (Bước 1)
+- `media-ai-gateway` và `mock-ai-worker` đang chạy (Bước 4)
+
+### Chạy
+
+```bash
+cd ~/media-ai
+chmod +x test-rtp-callback.sh mock-callback-server
+
+# Mặc định: cổng 9999, chờ 1 final result, timeout 30s
+./test-rtp-callback.sh
+
+# Tùy chỉnh
+CALLBACK_PORT=9999 EXPECT_FINAL=1 CALLBACK_TIMEOUT=30 ./test-rtp-callback.sh 127.0.0.1 8080
+```
+
+Script tự động:
+1. Tìm hoặc build `mock-callback-server` (nếu chưa có trong cùng thư mục)
+2. Khởi động `mock-callback-server --port 9999 --expect-final 1 --timeout 30s`
+3. Tạo session với `callback_url: http://127.0.0.1:9999`
+4. Gửi 200 PCMU RTP packets
+5. Chờ gateway gửi callback HTTP/2 POST tới mock server
+6. Verify kết quả
+
+### Kết quả kỳ vọng
+
+```
+[OK]  mock-callback-server ready ✓
+[OK]  Session created (HTTP 201, HTTP/2.0) ✓
+[OK]  Callback(s) nhận thành công sau Xs ✓
+[OK]  Nhận 1 final callback (expect ≥1) ✓
+[OK]  Gateway đã gửi callback thành công: +1 ✓
+[OK]  Không có callback error ✓
+[OK]  Pipeline decode OK: +200/200 jobs ✓
+[OK]  Callback E2E test PASSED ✓
+```
+
+### Output mock-callback-server
+
+Mỗi dòng là một JSON:
+
+```json
+{"event":"ready","port":9999}
+{"event":"callback","event_type":"asr.transcript.partial","session_id":"cb-...","text":"xin","is_final":false,"seq":1}
+{"event":"callback","event_type":"asr.transcript.final","session_id":"cb-...","text":"xin chào","is_final":true,"seq":2}
+{"event":"summary","stats":{"asr.transcript.final":1,"asr.transcript.partial":2}}
+```
+
+---
+
 ## Troubleshooting
 
 | Triệu chứng | Nguyên nhân | Cách fix |
@@ -162,6 +239,10 @@ chmod +x lab-rtp-test.sh
 | `Audio jobs processed = 0` | Decode error | Xác nhận `codec: PCMU`, `sample_rate: 8000` |
 | Mock không log `stream opened` | gRPC không kết nối | Kiểm tra `grpc_target: "127.0.0.1:50051"` |
 | `HTTP 503 no_ai_worker` | gateway chưa thấy mock | Chờ 2–3s sau khi start gateway rồi test |
+| `Callback E2E: 0 final callback` | mock-ai-worker chưa gửi final | Kiểm tra đủ 200 packets (~8 AudioChunk) |
+| `result_sent_total không tăng` | callback_url không được set | Đảm bảo tạo session có `callback_url` |
+| `mock-callback-server: address in use` | Port 9999 bị chiếm | Đặt `CALLBACK_PORT=9998` hoặc kill process cũ |
+| `mock-callback-server: build failed` | Go không trong PATH | Build thủ công: `go build ./cmd/mock-callback-server` |
 
 ### Xem log chi tiết
 
