@@ -19,7 +19,9 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 GW_HOST="${1:-127.0.0.1}"
 GW_PORT="${2:-8080}"
-METRICS_PORT="${3:-9090}"
+# METRICS_PORT mặc định bằng GW_PORT vì /metrics được serve trên gin router (:8080).
+# Chỉ khác khi gateway cấu hình metrics_addr riêng (ví dụ :9090).
+METRICS_PORT="${3:-${2:-8080}}"
 GW_BASE="http://${GW_HOST}:${GW_PORT}"
 METRICS_BASE="http://${GW_HOST}:${METRICS_PORT}"
 
@@ -39,6 +41,16 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 sep()   { echo -e "${BOLD}────────────────────────────────────────${NC}"; }
+
+# get_metric <metric_name> — lấy giá trị Prometheus metric, trả "0" nếu không có.
+# Dùng grep -m1 + default để tránh exit code 1 khi metric chưa xuất hiện.
+get_metric() {
+    local name="$1"
+    curl -s "${METRICS_BASE}/metrics" \
+        | grep -m1 "^${name} " \
+        | awk '{print $2}' \
+        || echo "0"
+}
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 sep
@@ -94,9 +106,9 @@ ok "Gateway ready — $BODY"
 sep
 info "Step 2 — Metrics baseline"
 
-PORTS_BEFORE=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_rtp_ports_available " | awk '{print $2}')
-SUBMITTED_BEFORE=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_pool_submitted_total " | awk '{print $2}')
-PROCESSED_BEFORE=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_pool_processed_total " | awk '{print $2}')
+PORTS_BEFORE=$(get_metric "media_ai_rtp_ports_available")
+SUBMITTED_BEFORE=$(get_metric "media_ai_pool_submitted_total")
+PROCESSED_BEFORE=$(get_metric "media_ai_pool_processed_total")
 
 info "  rtp_ports_available  = ${PORTS_BEFORE:-N/A}"
 info "  pool_submitted_total = ${SUBMITTED_BEFORE:-0}"
@@ -202,9 +214,9 @@ sep
 info "Step 5 — Verify metrics sau khi gửi packet"
 sleep 1   # chờ pipeline flush
 
-PORTS_AFTER=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_rtp_ports_available " | awk '{print $2}')
-SUBMITTED_AFTER=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_pool_submitted_total " | awk '{print $2}')
-PROCESSED_AFTER=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_pool_processed_total " | awk '{print $2}')
+PORTS_AFTER=$(get_metric "media_ai_rtp_ports_available")
+SUBMITTED_AFTER=$(get_metric "media_ai_pool_submitted_total")
+PROCESSED_AFTER=$(get_metric "media_ai_pool_processed_total")
 
 PORTS_USED=$(( ${PORTS_BEFORE:-0} - ${PORTS_AFTER:-0} ))
 SUBMITTED_DELTA=$(( ${SUBMITTED_AFTER:-0} - ${SUBMITTED_BEFORE:-0} ))
@@ -241,7 +253,7 @@ DEL_CODE=$(h2curl -o /dev/null -w "%{http_code}" \
 [[ "$DEL_CODE" == "204" ]] && ok "Session deleted (HTTP 204)" || fail "Delete thất bại (HTTP $DEL_CODE)"
 
 sleep 0.5
-PORTS_FINAL=$(curl -s "${METRICS_BASE}/metrics" | grep "^media_ai_rtp_ports_available " | awk '{print $2}')
+PORTS_FINAL=$(get_metric "media_ai_rtp_ports_available")
 info "  rtp_ports_available after delete: ${PORTS_FINAL}"
 [[ "${PORTS_FINAL}" == "${PORTS_BEFORE}" ]] && ok "Port returned to pool ✓" \
     || warn "Port count: before=${PORTS_BEFORE} after=${PORTS_FINAL}"
