@@ -1,0 +1,70 @@
+# Media AI Gateway — cấu hình test với mock-ai-worker
+#
+# Dùng: media-ai-gateway --config config/gateway-mock.yaml
+#
+# Yêu cầu: mock-ai-worker đang chạy tại 127.0.0.1:50051
+#   ./mock-ai-worker --addr :50051 --log-level debug
+#
+# Lab script:
+#   ./scripts/lab-rtp-test.sh 127.0.0.1 8080
+#
+# Nếu lab server có IP khác 127.0.0.1, sửa rtp.public_ip và chạy:
+#   ./scripts/lab-rtp-test.sh <LAB_IP> 8080
+
+gateway:
+  name: "media-ai-gateway"
+  id: "gw-mock"
+  raw_rtp_enabled: true
+  webrtc_enabled: false   # tắt WebRTC cho test RTP đơn giản
+
+server:
+  http_addr: ":8080"
+  # metrics_addr để trống → /metrics phục vụ trên cùng port 8080
+  # lab-rtp-test.sh mặc định METRICS_PORT=GW_PORT nên không cần thay đổi
+  shutdown_timeout_sec: 5
+
+rtp:
+  listen_addr: ":5004"
+  public_ip: "127.0.0.1"   # đổi thành IP lab server nếu gửi từ máy khác
+  bind_ip: ""               # bind tất cả interface
+  port_start: 40000
+  port_end:   40099         # 100 per-session ports
+
+session:
+  max_sessions: 50
+  idle_timeout_sec: 60      # 60s để tránh GC giữa các bước test
+  gc_interval_sec: 5
+  per_session_packet_queue: 256
+  per_session_audio_queue:  128
+  per_session_result_queue: 64
+
+pipeline:
+  audio_worker_count: 4
+  audio_job_queue_size: 512
+  jitter_buffer_ms: 60
+  max_packet_late_ms: 120
+  packet_time_ms: 20
+
+audio:
+  output_sample_rate: 16000
+  output_channels: 1
+  chunk_ms: 500             # 500ms/chunk → cần 25 RTP packets (PCMU 8kHz 20ms)
+
+ai:
+  grpc_target: "127.0.0.1:50051"   # mock-ai-worker
+  max_active_streams: 100
+  per_stream_queue_size: 20
+  send_timeout_ms: 1000     # 1s timeout per gRPC Send
+  stream_timeout_sec: 300
+  max_retry: 2
+  retry_backoff_ms: 500
+
+result:
+  dispatcher_workers: 4
+  queue_size: 256
+  drop_partial_when_full: true
+  send_timeout_ms: 2000
+
+log:
+  level: "info"   # đổi "debug" để xem chi tiết từng bước pipeline
+  format: "json"

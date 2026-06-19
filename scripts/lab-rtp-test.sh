@@ -29,7 +29,10 @@ SESSION_ID="lab-rtp-$(date +%s)"
 SSRC=55001
 CODEC="PCMU"
 SAMPLE_RATE=8000
-RTP_PACKETS=50        # số packet gửi (~1 giây audio ở 20ms/packet)
+RTP_PACKETS=200       # số packet gửi (~4 giây audio ở 20ms/packet)
+# 1 AudioChunk = 500ms = 25 packets (8kHz PCMU → 16kHz, ChunkMs=500)
+# Mock AI: partial sau 3 chunks (75 packets), final sau 6 chunks (150 packets)
+# 200 packets → 8 chunks → 2 partial + 1 final từ mock-ai-worker
 PACKET_INTERVAL=0.02  # 20ms giữa các packet
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -212,11 +215,15 @@ PYEOF
 # ── Step 5: Verify metrics ────────────────────────────────────────────────────
 sep
 info "Step 5 — Verify metrics sau khi gửi packet"
-sleep 1   # chờ pipeline flush
+sleep 3   # chờ pipeline flush (4s audio + 3s buffer = đủ để mock nhận 8 chunks)
 
 PORTS_AFTER=$(get_metric "media_ai_rtp_ports_available")
 SUBMITTED_AFTER=$(get_metric "media_ai_pool_submitted_total")
 PROCESSED_AFTER=$(get_metric "media_ai_pool_processed_total")
+SESSIONS_NOW=$(get_metric "media_ai_sessions_active")
+AI_STREAMS_NOW=$(get_metric "media_ai_ai_streams_active")
+AI_SEND_ERR=$(get_metric "media_ai_ai_send_errors_total")
+AI_RECV_ERR=$(get_metric "media_ai_ai_recv_errors_total")
 
 PORTS_USED=$(( ${PORTS_BEFORE:-0} - ${PORTS_AFTER:-0} ))
 SUBMITTED_DELTA=$(( ${SUBMITTED_AFTER:-0} - ${SUBMITTED_BEFORE:-0} ))
@@ -225,12 +232,24 @@ PROCESSED_DELTA=$(( ${PROCESSED_AFTER:-0} - ${PROCESSED_BEFORE:-0} ))
 info "  rtp_ports_available  : ${PORTS_BEFORE} → ${PORTS_AFTER}  (dùng: ${PORTS_USED})"
 info "  pool_submitted_total : ${SUBMITTED_BEFORE} → ${SUBMITTED_AFTER}  (delta: +${SUBMITTED_DELTA})"
 info "  pool_processed_total : ${PROCESSED_BEFORE} → ${PROCESSED_AFTER}  (delta: +${PROCESSED_DELTA})"
+info "  sessions_active      : ${SESSIONS_NOW}"
+info "  ai_streams_active    : ${AI_STREAMS_NOW}"
+info "  ai_send_errors_total : ${AI_SEND_ERR}"
+info "  ai_recv_errors_total : ${AI_RECV_ERR}"
 
 [[ "$PORTS_USED" -ge 1 ]] && ok "Port allocated ✓" || warn "Port count không đổi"
 [[ "$SUBMITTED_DELTA" -gt 0 ]] && ok "Audio jobs submitted: +${SUBMITTED_DELTA} ✓" \
     || warn "Không có audio job nào được submit (packet có thể bị drop)"
 [[ "$PROCESSED_DELTA" -gt 0 ]] && ok "Audio jobs processed: +${PROCESSED_DELTA} ✓" \
     || warn "Không có audio job nào được process"
+[[ "${SESSIONS_NOW}" -ge 1 ]] && ok "Session still active ✓" \
+    || warn "Session đã biến mất (idle timeout hoặc lỗi pipeline)"
+[[ "${AI_STREAMS_NOW}" -ge 1 ]] && ok "AI gRPC stream active ✓" \
+    || warn "AI stream không active (mock-ai-worker chưa chạy hoặc stream lỗi)"
+[[ "${AI_SEND_ERR}" == "0" ]] && ok "AI send errors: 0 ✓" \
+    || warn "AI send errors: ${AI_SEND_ERR} (kiểm tra SendTimeout hoặc kết nối)"
+[[ "${AI_RECV_ERR}" == "0" ]] && ok "AI recv errors: 0 ✓" \
+    || warn "AI recv errors: ${AI_RECV_ERR}"
 
 # ── Step 6: Get session ───────────────────────────────────────────────────────
 sep
@@ -264,8 +283,12 @@ echo -e "${BOLD}Summary${NC}"
 echo -e "  Gateway          : ${GW_BASE}  (${H2_MODE})"
 echo -e "  Session ID       : ${SESSION_ID}"
 echo -e "  RTP endpoint     : ${RTP_IP}:${RTP_PORT}"
-echo -e "  Packets sent     : ${RTP_PACKETS}"
+echo -e "  Packets sent     : ${RTP_PACKETS} (~$((RTP_PACKETS / 25)) AudioChunks @ 500ms)"
 echo -e "  Jobs processed   : +${PROCESSED_DELTA}"
+echo -e "  AI stream active : ${AI_STREAMS_NOW}  (send_err=${AI_SEND_ERR} recv_err=${AI_RECV_ERR})"
 echo -e "  Port pool        : ${PORTS_BEFORE} → ${PORTS_AFTER} → ${PORTS_FINAL} (restored)"
+echo -e ""
+echo -e "  mock-ai-worker (nếu đang chạy): partial mỗi 3 chunks, final mỗi 6 chunks"
+echo -e "  200 packets → 8 chunks → 2 partial + 1 final logs trong mock"
 sep
 ok "Lab test PASSED"
