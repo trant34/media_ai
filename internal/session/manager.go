@@ -1,0 +1,266 @@
+package session
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"media-ai-gateway/internal/pipeline"
+)
+
+// Sentinel errors trả về bởi Create.
+var (
+	ErrMaxSessions    = errors.New("session: max sessions reached")
+	ErrDuplicateID    = errors.New("session: duplicate session ID")
+)
+
+// ManagerConfig giữ cấu hình cho Manager.
+type ManagerConfig struct {
+	MaxSessions     int
+	IdleTimeout     time.Duration
+	PacketQueueSize int
+	AudioQueueSize  int
+	ResultQueueSize int
+	GCInterval      time.Duration
+}
+
+// DefaultConfig trả về cấu hình mặc định phù hợp với production.
+func DefaultConfig() ManagerConfig {
+	return ManagerConfig{
+		MaxSessions:     10000,
+		IdleTimeout:     30 * time.Second,
+		PacketQueueSize: 128,
+		AudioQueueSize:  128,
+		ResultQueueSize: 64,
+		GCInterval:      5 * time.Second,
+	}
+}
+
+// SessionConfig giữ tham số để tạo session mới.
+type SessionConfig struct {
+	ID          string
+	SourceType  string // "raw_rtp" | "webrtc"
+	SSRC        uint32
+	PayloadType uint8
+	Codec       string
+	SampleRate  int
+	Channels    int
+	Language    string
+	Task        string
+	CallbackURL string
+	PeerID      string
+	TrackID     string
+	RemoteAddr  string // expected source UDP addr "ip:port" for raw_rtp addr-based routing
+}
+
+// Manager quản lý lifecycle của tất cả media session.
+//
+// Mọi method đều goroutine-safe. Background GC được khởi chạy bởi Run().
+type Manager struct {
+	cfg        ManagerConfig
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	ssrcIndex  map[uint32]string // SSRC       → session ID; chỉ chứa SSRC != 0
+	addrIndex  map[string]string // RemoteAddr → session ID; chỉ chứa RemoteAddr != ""
+	peerIndex  map[string]string // PeerID     → session ID; chỉ chứa PeerID != ""
+	trackIndex map[string]string // TrackID    → session ID; chỉ chứa TrackID != ""
+}
+
+// NewManager tạo Manager với config cho trước.
+func NewManager(cfg ManagerConfig) *Manager {
+	return &Manager{
+		cfg:        cfg,
+		sessions:   make(map[string]*Session),
+		ssrcIndex:  make(map[uint32]string),
+		addrIndex:  make(map[string]string),
+		peerIndex:  make(map[string]string),
+		trackIndex: make(map[string]string),
+	}
+}
+
+// Create phân bổ Session mới. Trả về ErrMaxSessions hoặc ErrDuplicateID nếu bị từ chối.
+func (m *Manager) Create(cfg SessionConfig) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.sessions) >= m.cfg.MaxSessions {
+		return nil, ErrMaxSessions
+	}
+	if _, exists := m.sessions[cfg.ID]; exists {
+		return nil, ErrDuplicateID
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Now()
+
+	s := &Session{
+		ID:           cfg.ID,
+		SourceType:   cfg.SourceType,
+		SSRC:         cfg.SSRC,
+		PayloadType:  cfg.PayloadType,
+		Codec:        cfg.Codec,
+		SampleRate:   cfg.SampleRate,
+		Channels:     cfg.Channels,
+		Language:     cfg.Language,
+		Task:         cfg.Task,
+		CallbackURL:  cfg.CallbackURL,
+		PeerID:       cfg.PeerID,
+		TrackID:      cfg.TrackID,
+		RemoteAddr:   cfg.RemoteAddr,
+		PacketQueue:  make(chan pipeline.MediaPacket, m.cfg.PacketQueueSize),
+		AudioQueue:   make(chan pipeline.AudioChunk, m.cfg.AudioQueueSize),
+		ResultQueue:  make(chan pipeline.RecognitionResult, m.cfg.ResultQueueSize),
+		CreatedAt:    now,
+		Ctx:          ctx,
+		cancel:       cancel,
+		lastPacketAt: now,
+		status:       StatusCreated,
+	}
+
+	m.sessions[cfg.ID] = s
+	if cfg.SSRC != 0 {
+		m.ssrcIndex[cfg.SSRC] = cfg.ID
+	}
+	if cfg.RemoteAddr != "" {
+		m.addrIndex[cfg.RemoteAddr] = cfg.ID
+	}
+	if cfg.PeerID != "" {
+		m.peerIndex[cfg.PeerID] = cfg.ID
+	}
+	if cfg.TrackID != "" {
+		m.trackIndex[cfg.TrackID] = cfg.ID
+	}
+	return s, nil
+}
+
+// Get trả về session theo ID. ok=false nếu không tìm thấy.
+func (m *Manager) Get(id string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// GetBySSRC trả về session theo SSRC. ok=false nếu SSRC không được map.
+func (m *Manager) GetBySSRC(ssrc uint32) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.ssrcIndex[ssrc]
+	if !ok {
+		return nil, false
+	}
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// GetByAddr trả về session theo remote UDP addr "ip:port".
+// ok=false nếu addr không được map (hoặc addr == "").
+func (m *Manager) GetByAddr(addr string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.addrIndex[addr]
+	if !ok {
+		return nil, false
+	}
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// GetByPeerID trả về session theo PeerID (WebRTC peer connection ID).
+// ok=false nếu không có session nào map với peerID đó.
+func (m *Manager) GetByPeerID(peerID string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.peerIndex[peerID]
+	if !ok {
+		return nil, false
+	}
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// GetByTrackID trả về session theo TrackID (WebRTC track ID).
+// ok=false nếu không có session nào map với trackID đó.
+func (m *Manager) GetByTrackID(trackID string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.trackIndex[trackID]
+	if !ok {
+		return nil, false
+	}
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// Close đóng session theo ID, cancel Ctx của nó.
+// Trả về false nếu session không tồn tại.
+func (m *Manager) Close(id string) bool {
+	m.mu.Lock()
+	s, ok := m.sessions[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	s.setStatus(StatusClosing)
+	delete(m.sessions, id)
+	if s.SSRC != 0 {
+		delete(m.ssrcIndex, s.SSRC)
+	}
+	if s.RemoteAddr != "" {
+		delete(m.addrIndex, s.RemoteAddr)
+	}
+	if s.PeerID != "" {
+		delete(m.peerIndex, s.PeerID)
+	}
+	if s.TrackID != "" {
+		delete(m.trackIndex, s.TrackID)
+	}
+	m.mu.Unlock()
+
+	s.cancel()
+	s.setStatus(StatusClosed)
+	return true
+}
+
+// Count trả về số session đang active.
+func (m *Manager) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
+// MaxSessions trả về giới hạn session tối đa (dùng để tính % sử dụng).
+func (m *Manager) MaxSessions() int { return m.cfg.MaxSessions }
+
+// Run khởi động vòng lặp GC nền, kiểm tra idle timeout theo GCInterval.
+// Blocks cho đến khi ctx bị cancel.
+func (m *Manager) Run(ctx context.Context) {
+	ticker := time.NewTicker(m.cfg.GCInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-ticker.C:
+			m.gc(t)
+		}
+	}
+}
+
+// gc thu hồi các session đã idle quá IdleTimeout.
+// Dùng RLock để scan, sau đó Close() từng session (Close dùng Lock riêng).
+func (m *Manager) gc(now time.Time) {
+	m.mu.RLock()
+	var expired []string
+	for id, s := range m.sessions {
+		if s.isIdle(now, m.cfg.IdleTimeout) {
+			expired = append(expired, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, id := range expired {
+		m.Close(id)
+	}
+}

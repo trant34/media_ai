@@ -1,0 +1,25 @@
+# Binaries
+media-ai-gateway
+media-ai-gateway.exe
+gateway
+gateway.exe
+*.exe
+
+# Build output
+/dist/
+/bin/
+
+# Test artifacts
+*.test
+*.out
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

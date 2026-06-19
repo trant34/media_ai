@@ -1,0 +1,41 @@
+gateway:
+  name: "media-ai-gateway"
+  id: "gw-local"
+  raw_rtp_enabled: true
+  webrtc_enabled: true
+
+server:
+  http_addr: ":8080"
+  metrics_addr: ":9090"
+  shutdown_timeout_sec: 5
+
+rtp:
+  listen_addr: ":5004"
+  public_ip: "127.0.0.1"
+  port_start: 40000
+  port_end:   40099
+
+session:
+  max_sessions: 100
+  idle_timeout_sec: 30
+  gc_interval_sec: 5
+
+pipeline:
+  audio_worker_count: 4
+  audio_job_queue_size: 512
+
+audio:
+  output_sample_rate: 16000
+  output_channels: 1
+  chunk_ms: 500
+
+ai:
+  grpc_target: ""   # NullDialer — gateway chạy đầy đủ, không có transcript
+
+result:
+  dispatcher_workers: 4
+  queue_size: 256
+
+log:
+  level: "debug"
+  format: "json"
