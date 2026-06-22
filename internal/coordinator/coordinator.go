@@ -23,6 +23,7 @@ type Config struct {
 	ChunkMs         int           // độ dài AudioChunk gửi AI (ms)
 	CallbackTimeout time.Duration // timeout mỗi HTTP callback request
 	CallbackRetry   int           // số lần retry HTTP callback (không kể lần đầu)
+	PCMDumpDir      string        // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
 }
 
 // DefaultConfig trả về cấu hình phù hợp cho production ASR.
@@ -91,6 +92,7 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 		SessionID:     sess.ID,
 		StreamID:      streamID,
 		StartMs:       time.Now().UnixMilli(),
+		PCMDumpDir:    c.cfg.PCMDumpDir,
 	}
 	if err := c.pool.RegisterSession(sess.Ctx, poolCfg, sess.AudioQueue); err != nil {
 		c.dispatcher.UnregisterSinks(sess.ID)

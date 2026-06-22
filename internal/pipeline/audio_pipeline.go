@@ -2,7 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"media-ai-gateway/internal/audio"
@@ -25,6 +29,12 @@ type SessionConfig struct {
 	SessionID string
 	StreamID  string
 	StartMs   int64 // wall-clock ms của packet đầu tiên, gốc timestamp cho chunks
+
+	// Debug: nếu non-empty, ghi raw decoded PCM (int16-LE) vào thư mục này.
+	// Tên file: <session_id>.<codec>.<rate>hz.<ch>ch.s16le
+	// Phát lại: ffplay -f s16le -ar <rate> -ac <ch> <file>
+	// Empty = tắt.
+	PCMDumpDir string
 }
 
 // sessionPipeline giữ state xử lý âm thanh theo từng session.
@@ -37,6 +47,7 @@ type sessionPipeline struct {
 	chunker   *audio.Chunker
 	audioOut  chan<- AudioChunk
 	ctx       context.Context // session ctx: dừng emit khi session đóng
+	pcmFile   *os.File        // non-nil khi PCM dump được bật
 }
 
 // process decode + resample + chunk một MediaPacket.
@@ -55,6 +66,10 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 	}
 	if len(pcm) == 0 {
 		return 0, nil
+	}
+
+	if sp.pcmFile != nil {
+		_ = binary.Write(sp.pcmFile, binary.LittleEndian, pcm)
 	}
 
 	resampled := sp.resampler.Resample(pcm)
@@ -86,6 +101,11 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 func (sp *sessionPipeline) flush() {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+
+	if sp.pcmFile != nil {
+		sp.pcmFile.Close()
+		sp.pcmFile = nil
+	}
 
 	ac := sp.chunker.Flush()
 	if ac == nil {
@@ -120,11 +140,30 @@ func newSessionPipeline(ctx context.Context, cfg SessionConfig, audioOut chan<- 
 		},
 		cfg.SessionID, cfg.StreamID, cfg.StartMs,
 	)
+
+	var pcmFile *os.File
+	if cfg.PCMDumpDir != "" {
+		if mkErr := os.MkdirAll(cfg.PCMDumpDir, 0o755); mkErr != nil {
+			return nil, fmt.Errorf("pipeline: pcm dump dir: %w", mkErr)
+		}
+		fname := filepath.Join(cfg.PCMDumpDir, fmt.Sprintf("%s.%s.%dhz.%dch.s16le",
+			cfg.SessionID,
+			strings.ToLower(strings.ReplaceAll(cfg.Codec, "-", "")),
+			dec.SampleRate(),
+			dec.Channels(),
+		))
+		pcmFile, err = os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: pcm dump open: %w", err)
+		}
+	}
+
 	return &sessionPipeline{
 		decoder:   dec,
 		resampler: resampler,
 		chunker:   chunker,
 		audioOut:  audioOut,
 		ctx:       ctx,
+		pcmFile:   pcmFile,
 	}, nil
 }

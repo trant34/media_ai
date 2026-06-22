@@ -107,9 +107,10 @@ type PipelineSection struct {
 
 // AudioSection cấu hình output audio format và chunk size.
 type AudioSection struct {
-	OutputSampleRate int `yaml:"output_sample_rate"`
-	OutputChannels   int `yaml:"output_channels"`
-	ChunkMs          int `yaml:"chunk_ms"`
+	OutputSampleRate int    `yaml:"output_sample_rate"`
+	OutputChannels   int    `yaml:"output_channels"`
+	ChunkMs          int    `yaml:"chunk_ms"`
+	PCMDumpDir       string `yaml:"pcm_dump_dir"` // "" = tắt; "data/output/pcm" = ghi PCM decode ra file để kiểm tra
 }
 
 // AISection cấu hình kết nối tới AI worker và gRPC stream.
@@ -284,6 +285,7 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		ChunkMs:         c.Audio.ChunkMs,
 		CallbackTimeout: time.Duration(c.Callback.TimeoutMs) * time.Millisecond,
 		CallbackRetry:   c.Callback.MaxRetry,
+		PCMDumpDir:      c.Audio.PCMDumpDir,
 	}
 }
 

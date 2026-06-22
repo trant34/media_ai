@@ -49,6 +49,10 @@ audio:
   output_sample_rate: 16000
   output_channels: 1
   chunk_ms: 500             # 500ms/chunk → cần 25 RTP packets (PCMU 8kHz 20ms)
+  # PCM dump: ghi raw decoded PCM (int16-LE, native codec rate) để verify transcode.
+  # Phát lại: ffplay -f s16le -ar 8000 -ac 1 data/output/pcm/<session>.pcmu.8000hz.1ch.s16le
+  # Tắt trên production (để trống hoặc xóa dòng này).
+  pcm_dump_dir: "data/output/pcm"
 
 ai:
   grpc_target: "127.0.0.1:50051"   # mock-ai-worker
