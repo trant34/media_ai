@@ -120,6 +120,7 @@ func (sp *sessionPipeline) flush() {
 		Channels:    ac.Channels,
 		TimestampMs: ac.TimestampMs,
 		DurationMs:  ac.DurationMs,
+		EndOfStream: true,
 	}:
 	default:
 	}

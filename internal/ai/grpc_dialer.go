@@ -37,6 +37,7 @@ type audioChunkWire struct {
 	Channels    int    `json:"channels"`
 	TimestampMs int64  `json:"timestamp_ms"`
 	DurationMs  int64  `json:"duration_ms"`
+	EndOfStream bool   `json:"end_of_stream,omitempty"`
 	Language    string `json:"language,omitempty"`
 	Task        string `json:"task,omitempty"`
 }
@@ -103,6 +104,7 @@ func (c *grpcStreamClient) Send(chunk pipeline.AudioChunk) error {
 		Channels:    chunk.Channels,
 		TimestampMs: chunk.TimestampMs,
 		DurationMs:  chunk.DurationMs,
+		EndOfStream: chunk.EndOfStream,
 		Language:    c.language,
 		Task:        c.task,
 	})
@@ -126,10 +128,14 @@ func (c *grpcStreamClient) Recv() (pipeline.RecognitionResult, error) {
 	}, nil
 }
 
-// CloseSend signals end-of-stream lên server và đóng kết nối.
-// Mỗi stream dùng một ClientConn riêng nên đóng là an toàn.
+// CloseSend gửi gRPC half-close (END_STREAM) lên server.
+// conn.Close() KHÔNG được gọi ở đây — gọi Close() sau khi Recv() trả về io.EOF.
 func (c *grpcStreamClient) CloseSend() error {
-	err := c.cs.CloseSend()
-	_ = c.conn.Close()
-	return err
+	return c.cs.CloseSend()
+}
+
+// Close đóng kết nối gRPC underlying. Phải gọi sau khi Recv() đã trả về io.EOF
+// để không cắt ngang final results từ server.
+func (c *grpcStreamClient) Close() error {
+	return c.conn.Close()
 }

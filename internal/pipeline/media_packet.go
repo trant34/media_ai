@@ -28,4 +28,5 @@ type AudioChunk struct {
 	Channels    int
 	TimestampMs int64
 	DurationMs  int64
+	EndOfStream bool // true = chunk cuối của stream, AI worker đóng nhận dạng sau chunk này
 }

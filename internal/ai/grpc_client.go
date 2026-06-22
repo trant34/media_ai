@@ -207,6 +207,11 @@ func (s *Stream) runPair(
 	}()
 
 	wg.Wait()
+	// Đóng kết nối sau khi cả send lẫn recv đã exit — tránh cắt ngang final results.
+	// grpcStreamClient implement io.Closer; NullDialer và mock không cần Close.
+	if closer, ok := client.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 // sendWithTimeout wraps client.Send với timeout nếu cfg.SendTimeout > 0.
