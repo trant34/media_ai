@@ -20,7 +20,7 @@
 #
 # AMR-WB file: data/generated/amrwb/speech.amr
 #   Format: #!AMR-WB\n magic (9 bytes) + frames FT=8 (1+60 bytes mỗi frame)
-#   3001 frames total; test gửi 200 frames = 4 giây audio
+#   3001 frames total; test gửi toàn bộ file = ~60 giây audio
 #
 # Expected PCM output:
 #   200 packets × 320 samples/packet × 2 bytes/sample = 128,000 bytes
@@ -40,12 +40,12 @@ GW_PORT="${2:-8080}"
 AI_ADDR="${3:-127.0.0.1:50051}"
 GW_BASE="http://${GW_HOST}:${GW_PORT}"
 
-RTP_PACKETS=200         # 200 × 20ms = 4s audio
+RTP_PACKETS=3001        # 3001 × 20ms = 60s audio (toàn bộ speech.amr)
 PACKET_INTERVAL=0.02    # 20ms inter-packet gap
 SSRC=60099
 SESSION_WAIT=5          # giây chờ pipeline flush sau khi gửi xong
 
-EXPECTED_PCM_BYTES=128000  # 200 × 320 samples × 2 bytes
+EXPECTED_PCM_BYTES=1920640 # 3001 × 320 samples × 2 bytes
 PCM_TOLERANCE=0.05         # cho phép ±5% (jitter buffer có thể drop 1-2 packet)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -365,8 +365,8 @@ print("  [OK] PCM có tín hiệu audio hợp lệ ✓")
 
 # Duration check
 duration_s = n_samples / 16000
-print(f"  Duration       : {duration_s:.2f}s  (expect ~4.00s)")
-if abs(duration_s - 4.0) > 0.2:
+print(f"  Duration       : {duration_s:.2f}s  (expect ~60.02s)")
+if abs(duration_s - 60.02) > 0.5:
     print(f"  [WARN] Duration sai lệch > 200ms")
 PYEOF
 
