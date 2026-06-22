@@ -407,6 +407,154 @@ sox data/output/pcm/*.s16le -n \
 
 ---
 
+## Bước 8 — Chạy với Docker Desktop (Windows)
+
+Cách nhanh nhất để có môi trường Linux + CGO + opencore-amrwb mà **không cần lab server**:
+Docker Desktop cung cấp Linux container trực tiếp trên Windows.
+
+### Kiến trúc Docker
+
+```
+Windows Host (Docker Desktop)
+│
+└─ Linux Container (golang:latest + libopencore-amrwb-dev)
+       │  mount  D:\NAMCHT\ims\SRC\media_ai  →  /app
+       │
+       ├─ bash scripts/test-pcm-dump-amrwb.sh
+       │     ├─ go build -tags opencore_amrwb  →  /app/bin/media-ai-gateway-amrwb
+       │     ├─ /app/bin/mock-ai-worker   :50051  (trong container)
+       │     ├─ /app/bin/media-ai-gateway :8080   (trong container)
+       │     ├─ /app/bin/mock-rtp-sender  → UDP :40xxx
+       │     └─ PCM output: /app/data/output/pcm/*.s16le
+       │
+       └─ /app/data/output/pcm/*.s16le
+              ↕  (mount, truy cập trực tiếp từ Windows)
+         D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\*.s16le
+```
+
+### Yêu cầu
+
+- Docker Desktop đang chạy (kiểm tra: `docker --version`)
+- Không cần cài Go, libopencore-amrwb, hay bất kỳ thứ gì khác trên Windows
+
+### Bước 1 — Build Docker image (1 lần)
+
+```powershell
+# Chạy tại D:\NAMCHT\ims\SRC\media_ai
+cd D:\NAMCHT\ims\SRC\media_ai
+
+docker build -f docker/Dockerfile.test-amrwb -t media-ai-test-amrwb .
+```
+
+Lần đầu mất 3–5 phút (pull `golang:latest` + install packages).
+Các lần sau dùng cache, gần như tức thì.
+
+Kiểm tra image đã build:
+```powershell
+docker image ls media-ai-test-amrwb
+```
+
+### Bước 2 — Chạy test
+
+```powershell
+# Chạy tại D:\NAMCHT\ims\SRC\media_ai
+docker run --rm -v "${PWD}:/app" media-ai-test-amrwb
+```
+
+> **Lưu ý:** `${PWD}` trong PowerShell là thư mục hiện tại.
+> Nếu dùng Command Prompt, thay bằng `%CD%`.
+
+Container sẽ:
+1. Build gateway với CGO + opencore_amrwb
+2. Khởi động mock-ai-worker và gateway bên trong container
+3. Gửi 200 packet AMR-WB
+4. Kiểm tra PCM output
+5. Tự dừng và cleanup
+
+### Bước 3 — Xem kết quả PCM
+
+Sau khi container kết thúc, file PCM xuất hiện trực tiếp trên Windows:
+
+```powershell
+# Liệt kê file PCM output
+ls D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\
+
+# Kiểm tra kích thước (phải ~128,000 bytes)
+(Get-Item "D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\*.s16le").Length
+```
+
+Để **nghe audio** trên Windows (cần cài [ffmpeg](https://ffmpeg.org/download.html)):
+
+```powershell
+# Tìm file PCM vừa tạo
+$pcm = (Get-ChildItem "D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\*.s16le" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+
+# Chuyển sang WAV và phát
+ffmpeg -f s16le -ar 16000 -ac 1 -i $pcm /tmp/output.wav
+# Hoặc phát trực tiếp
+ffplay -f s16le -ar 16000 -ac 1 $pcm
+```
+
+### Kết quả kỳ vọng
+
+```
+Step 1 — Preflight
+[OK]    libopencore-amrwb found ✓
+[OK]    go go1.25.x linux/amd64 ✓
+
+Step 2 — Build binaries với opencore_amrwb tag
+[OK]      gateway-amrwb built ✓
+[OK]      mock-ai-worker built ✓
+[OK]      mock-rtp-sender built ✓
+
+Step 3 — Khởi động services
+[OK]    Gateway ready (HTTP 200) ✓
+
+Step 6 — Gửi 200 AMR-WB packets qua mock-rtp-sender
+        packets_sent=200  frames_skipped=0
+
+Step 8 — Kiểm tra PCM dump file
+[OK]    PCM file size hợp lệ: 128000 bytes ✓
+        Tổng samples   : 64,000  (4.00s @ 16kHz)
+        Non-zero samples: 63,412 (99.1%)
+[OK]    PCM có tín hiệu audio hợp lệ ✓
+
+Step 9 — Kiểm tra metrics
+[OK]      Decode errors: 0 — AMR-WB CGO decode thành công ✓
+
+  RESULT: PASS
+```
+
+### Các lệnh hữu ích
+
+```powershell
+# Xem log real-time trong quá trình test
+docker run --rm -v "${PWD}:/app" media-ai-test-amrwb 2>&1 | Tee-Object -Variable output
+
+# Vào container để debug thủ công (không chạy test)
+docker run --rm -it -v "${PWD}:/app" media-ai-test-amrwb bash
+
+# Rebuild image sau khi sửa Dockerfile
+docker build --no-cache -f docker/Dockerfile.test-amrwb -t media-ai-test-amrwb .
+
+# Xóa image khi không cần nữa
+docker image rm media-ai-test-amrwb
+```
+
+### Troubleshooting — Docker
+
+| Triệu chứng | Nguyên nhân | Cách fix |
+|---|---|---|
+| `docker: command not found` | Docker Desktop chưa start | Mở Docker Desktop, chờ biểu tượng ổn định |
+| `invalid reference format` | `${PWD}` không được hỗ trợ | Dùng đường dẫn tuyệt đối: `-v "D:/NAMCHT/ims/SRC/media_ai:/app"` |
+| Build image timeout | Mạng chậm khi pull base image | Chạy lại; hoặc dùng `--network host` |
+| `permission denied: /app/bin/` | Mount volume read-only | Không thêm `:ro` vào lệnh `-v` |
+| `go: toolchain go1.25.0 unavailable` | `golang:latest` chưa có Go 1.25 | Đã set `GOTOOLCHAIN=local` — tự build với Go hiện tại |
+| Container thoát ngay không có log | Script lỗi sớm | `docker run --rm -it -v "${PWD}:/app" media-ai-test-amrwb bash` để debug |
+| PCM file không xuất hiện trên Windows | Test bị fail trước step 8 | Xem log, tìm `[FAIL]` |
+
+---
+
 ## Troubleshooting
 
 | Triệu chứng | Nguyên nhân | Cách fix |

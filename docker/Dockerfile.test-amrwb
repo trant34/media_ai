@@ -1,0 +1,38 @@
+# Môi trường test AMR-WB PCM dump trên Linux (chạy qua Docker Desktop trên Windows).
+#
+# Image cung cấp:
+#   - Go latest (CGO_ENABLED=1)
+#   - libopencore-amrwb-dev  → opencore-amrwb decode thực
+#   - curl, python3, lsof    → yêu cầu của test script
+#
+# Build (1 lần):
+#   docker build -f docker/Dockerfile.test-amrwb -t media-ai-test-amrwb .
+#
+# Chạy test (mount source từ Windows):
+#   docker run --rm -v "${PWD}:/app" media-ai-test-amrwb
+#
+# PCM output sau test (truy cập từ Windows):
+#   D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\*.s16le
+
+FROM golang:latest
+
+# GOTOOLCHAIN=local: dùng Go đã cài trong image, không download toolchain khác.
+# Cần thiết khi go.mod khai báo version cao hơn image tag mặc định.
+ENV CGO_ENABLED=1 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    GOTOOLCHAIN=local
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libopencore-amrwb-dev \
+        curl \
+        python3 \
+        lsof \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Source được mount từ ngoài (-v host:/app), không COPY vào image.
+# Giúp tránh rebuild image khi code thay đổi.
+
+CMD ["bash", "scripts/test-pcm-dump-amrwb.sh"]
