@@ -290,8 +290,8 @@ SUBMIT_DELTA=$(( ${SUBMIT_AFTER:-0} - ${SUBMIT_BEFORE:-0} ))
 PROC_DELTA=$(( ${PROC_AFTER:-0} - ${PROC_BEFORE:-0} ))
 ERR_DELTA=$(( ${ERR_AFTER:-0} - ${ERR_BEFORE:-0} ))
 
-info "  pool_submitted_total     : +${SUBMIT_DELTA}  (expect +200)"
-info "  pool_processed_total     : +${PROC_DELTA}   (expect +200)"
+info "  pool_submitted_total     : +${SUBMIT_DELTA}  (expect +${RTP_PACKETS})"
+info "  pool_processed_total     : +${PROC_DELTA}   (expect +${RTP_PACKETS})"
 info "  pool_decode_errors_total : +${ERR_DELTA}  (expect 0)"
 
 [[ "$SUBMIT_DELTA" -ge 190 ]] && ok "  Submitted: +${SUBMIT_DELTA}/200 ✓" || warn "  Submitted thấp: ${SUBMIT_DELTA}/200"
@@ -373,8 +373,8 @@ SUBMIT_DELTA=$(( ${SUBMIT_AFTER:-0} - ${SUBMIT_BEFORE:-0} ))
 PROC_DELTA=$(( ${PROC_AFTER:-0} - ${PROC_BEFORE:-0} ))
 ERR_DELTA=$(( ${ERR_AFTER:-0} - ${ERR_BEFORE:-0} ))
 
-info "  pool_submitted_total     : +${SUBMIT_DELTA}  (expect +200)"
-info "  pool_processed_total     : +${PROC_DELTA}   (expect +200)"
+info "  pool_submitted_total     : +${SUBMIT_DELTA}  (expect +${RTP_PACKETS})"
+info "  pool_processed_total     : +${PROC_DELTA}   (expect +${RTP_PACKETS})"
 info "  pool_decode_errors_total : +${ERR_DELTA}  (expect 0)"
 
 [[ "$SUBMIT_DELTA" -ge 190 ]] && ok "  Submitted: +${SUBMIT_DELTA}/200 ✓" || warn "  Submitted thấp: ${SUBMIT_DELTA}/200"
