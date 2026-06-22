@@ -8,8 +8,11 @@
 # Build (1 lần):
 #   docker build -f docker/Dockerfile.test-amrwb -t media-ai-test-amrwb .
 #
-# Chạy test (mount source từ Windows):
-#   docker run --rm -v "${PWD}:/app" media-ai-test-amrwb
+# Chạy test (mount source từ Windows — dùng forward-slash, không dùng ${PWD}):
+#   docker run --rm -v "D:/NAMCHT/ims/SRC/media_ai:/app" media-ai-test-amrwb
+#
+# Lý do không dùng ${PWD}: Git Bash trả về /d/... thay vì D:/... nên Docker
+# Desktop không nhận ra và bỏ qua volume mount silently.
 #
 # PCM output sau test (truy cập từ Windows):
 #   D:\NAMCHT\ims\SRC\media_ai\data\output\pcm\*.s16le
@@ -28,11 +31,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         python3 \
         lsof \
+        dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Source được mount từ ngoài (-v host:/app), không COPY vào image.
 # Giúp tránh rebuild image khi code thay đổi.
-
-CMD ["bash", "scripts/test-pcm-dump-amrwb.sh"]
+#
+# dos2unix chuyển CRLF → LF cho script trước khi chạy.
+# Cần thiết khi git checkout trên Windows tạo file CRLF.
+CMD ["bash", "-c", "dos2unix scripts/test-pcm-dump-amrwb.sh && bash scripts/test-pcm-dump-amrwb.sh"]

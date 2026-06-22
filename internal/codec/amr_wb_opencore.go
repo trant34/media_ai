@@ -72,9 +72,9 @@ func (d *amrWBDecoder) Decode(payload []byte) ([]int16, error) {
 		serial[0] = f.FT
 		copy(serial[1:], f.Payload)
 
-		bfi := C.short(0)
+		bfi := C.int(0)
 		if !f.Quality {
-			bfi = C.short(1)
+			bfi = C.int(1)
 		}
 
 		C.D_IF_decode(
