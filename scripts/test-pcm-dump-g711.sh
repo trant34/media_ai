@@ -30,7 +30,7 @@ PCM_DIR="data/output/pcm"
 PCMU_FILE="data/generated/g711/speech.pcmu"
 PCMA_SILENCE="/tmp/silence.pcma"   # tạo trong script
 
-RTP_PACKETS=200   # 200 × 20ms = 4s
+RTP_PACKETS=3000  # 3000 × 20ms = 60s (toàn bộ speech.pcmu)
 SSRC_PCMU=60001
 SSRC_PCMA=60002
 
@@ -233,8 +233,8 @@ info "Step 7 — Kiểm tra PCM dump (PCMU @ 8kHz → 8000hz.1ch.s16le)"
 ok "  PCM file tồn tại ✓"
 
 PCM_SIZE=$(stat -c%s "$PCM_FILE_PCMU")
-# 200 packets × 160 samples × 2 bytes = 64,000 bytes (pre-resample raw decoder output)
-EXPECTED=64000
+# 3000 packets × 160 samples × 2 bytes = 960,000 bytes (pre-resample raw decoder output)
+EXPECTED=960000
 EXPECT_LOW=$((EXPECTED * 95 / 100))
 EXPECT_HIGH=$((EXPECTED * 105 / 100))
 info "  File size: ${PCM_SIZE} bytes"
@@ -273,7 +273,7 @@ elif rms > 100:
     print("  [OK] PCM có tín hiệu audio ✓")
 else:
     print("  [WARN] RMS thấp — tín hiệu yếu")
-print(f"  Duration       : {dur_s:.2f}s  (expect ~4.00s)")
+print(f"  Duration       : {dur_s:.2f}s  (expect ~60.00s)")
 PYEOF
 
 ok "  PCM nội dung hợp lệ ✓"
