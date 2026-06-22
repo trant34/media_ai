@@ -228,6 +228,185 @@ Mỗi dòng là một JSON:
 
 ---
 
+## Bước 7 — AMR-WB PCM Dump Test (test-pcm-dump-amrwb.sh)
+
+Kiểm tra pipeline decode AMR-WB thực sự ra PCM int16-LE và ghi xuống file.
+Script **tự quản lý toàn bộ**: build CGO binary → start services → gửi RTP → verify output → cleanup.
+
+### Kiến trúc
+
+```
+[test-pcm-dump-amrwb.sh]
+      │  build  →  gateway-amrwb (CGO + opencore_amrwb tag)
+      │  build  →  mock-rtp-sender
+      │
+      │  start  →  mock-ai-worker :50051
+      │  start  →  gateway-amrwb  :8080  (pcm_dump_dir=data/output/pcm)
+      │
+      │  POST /v1/sessions  (codec=AMR-WB)
+      │
+      ▼
+[mock-rtp-sender]
+      │  UDP 200 packet × 62 bytes  →  gateway-amrwb :40xxx
+      │  Format: CMR(0xF0) + TOC(0x44) + 60 bytes AMR-WB FT=8 frame
+      ▼
+[gateway-amrwb]
+      │  opencore-amrwb decode  →  PCM int16-LE 16kHz
+      │  ghi mỗi frame vào: data/output/pcm/<session>.amrwb.16000hz.1ch.s16le
+      │  resample + chunk → AudioChunk → mock-ai-worker
+      ▼
+[data/output/pcm/<session>.amrwb.16000hz.1ch.s16le]
+      └─  ~128,000 bytes  (200 frames × 320 samples × 2 bytes)
+```
+
+### Yêu cầu
+
+| Thành phần | Lệnh cài |
+|---|---|
+| Linux (Ubuntu/Debian) | — |
+| opencore-amrwb | `apt-get install libopencore-amrwb-dev` |
+| Go ≥ 1.22 với CGO | mặc định bật trên Linux |
+| curl, python3 | thường đã có sẵn |
+
+> **Không chạy được trên Windows** — CGO yêu cầu Linux toolchain và `libopencore-amrwb.so`.
+
+### Bước 1 — Copy source lên lab server
+
+Từ máy Windows, copy toàn bộ project (hoặc chỉ những file cần thiết):
+
+```bash
+LAB="USER@LAB_IP"
+
+# Toàn bộ source (nếu chưa có)
+scp -r D:/NAMCHT/ims/SRC/media_ai  $LAB:~/media-ai/src
+
+# Hoặc chỉ update các file mới nhất
+scp D:/NAMCHT/ims/SRC/media_ai/cmd/mock-rtp-sender/main.go      $LAB:~/media-ai/src/cmd/mock-rtp-sender/
+scp D:/NAMCHT/ims/SRC/media_ai/internal/pipeline/audio_pipeline.go  $LAB:~/media-ai/src/internal/pipeline/
+scp D:/NAMCHT/ims/SRC/media_ai/internal/coordinator/coordinator.go   $LAB:~/media-ai/src/internal/coordinator/
+scp D:/NAMCHT/ims/SRC/media_ai/internal/config/config.go             $LAB:~/media-ai/src/internal/config/
+scp D:/NAMCHT/ims/SRC/media_ai/config/gateway-mock.yaml              $LAB:~/media-ai/src/config/
+scp D:/NAMCHT/ims/SRC/media_ai/scripts/test-pcm-dump-amrwb.sh        $LAB:~/media-ai/src/scripts/
+scp D:/NAMCHT/ims/SRC/media_ai/data/generated/amrwb/speech.amr       $LAB:~/media-ai/src/data/generated/amrwb/
+```
+
+### Bước 2 — Cài thư viện trên lab server
+
+```bash
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install -y libopencore-amrwb-dev
+
+# RHEL / CentOS (cần EPEL)
+sudo yum install -y epel-release && sudo yum install -y opencore-amr-devel
+
+# Verify
+ldconfig -p | grep libopencore-amrwb
+# → libopencor-amrwb.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libopencore-amrwb.so.0
+```
+
+### Bước 3 — Chạy test (tự động hoàn toàn)
+
+```bash
+cd ~/media-ai/src
+chmod +x scripts/test-pcm-dump-amrwb.sh
+
+# Chạy trên cùng máy (mặc định)
+./scripts/test-pcm-dump-amrwb.sh
+
+# Chỉ định host/port nếu cần
+./scripts/test-pcm-dump-amrwb.sh 127.0.0.1 8080
+```
+
+Script **không cần khởi động gateway/worker trước** — nó tự build và quản lý mọi process.
+Nếu port 8080 hoặc 50051 đang dùng, script sẽ kill process cũ trước khi start.
+
+### Bước 4 — Kết quả kỳ vọng
+
+```
+╔═══════════════════════════════════════════════════╗
+║  AMR-WB PCM Dump Test (CGO / opencore-amrwb)     ║
+╚═══════════════════════════════════════════════════╝
+
+[INFO]  Step 1 — Preflight
+[OK]    libopencore-amrwb found ✓
+[OK]    go go1.22.x ✓
+[OK]    AMR-WB file: .../speech.amr (183070 bytes, ~3001 frames FT=8) ✓
+[OK]    gateway-mock.yaml có pcm_dump_dir ✓
+
+[INFO]  Step 2 — Build binaries với opencore_amrwb tag
+[OK]      gateway-amrwb built ✓
+[OK]      mock-ai-worker built ✓
+[OK]      mock-rtp-sender built ✓
+
+[INFO]  Step 3 — Khởi động services
+[OK]    Gateway ready (HTTP 200) ✓
+
+[INFO]  Step 4 — Tạo AMR-WB session
+[OK]    Session created (HTTP 201)
+[OK]    RTP endpoint: 127.0.0.1:40099
+
+[INFO]  Step 6 — Gửi 200 AMR-WB packets qua mock-rtp-sender
+        file_format=amrwb  pt=98  ssrc=60099  ptime_ms=20  ts_incr=320
+        sent=50  sent=100  sent=150  sent=200
+        packets_sent=200  frames_skipped=0
+
+[INFO]  Step 8 — Kiểm tra PCM dump file
+[OK]    PCM file tồn tại ✓
+[OK]    PCM file không trống ✓
+[OK]    PCM file size hợp lệ: 128000 bytes (expect 121600–134400) ✓
+        Tổng samples   : 64,000  (4.00s @ 16kHz)
+        Non-zero samples: 63,412 (99.1%)
+        Max amplitude  : 18432 / 32767  (56.3% of full scale)
+        RMS amplitude  : 2814.3
+        [OK] PCM có tín hiệu audio hợp lệ ✓
+        Duration       : 4.00s  (expect ~4.00s)
+
+[INFO]  Step 9 — Kiểm tra metrics
+[OK]      Submitted: +200/200 ✓
+[OK]      Processed: +200/200 ✓
+[OK]      Decode errors: 0 — AMR-WB CGO decode thành công ✓
+
+[INFO]  Step 10 — Playback
+        ffplay -f s16le -ar 16000 -ac 1 'data/output/pcm/amrwb-pcmdump-xxx.amrwb.16000hz.1ch.s16le'
+
+══════════════ AMR-WB PCM Dump Test Summary ══════════════
+  RESULT: PASS
+  AMR-WB → PCM decode + dump hoạt động đúng ✓
+```
+
+### Bước 5 — Nghe / kiểm tra PCM output
+
+```bash
+# Phát trực tiếp (cần ffplay / ffmpeg)
+ffplay -f s16le -ar 16000 -ac 1 \
+    data/output/pcm/amrwb-pcmdump-*.amrwb.16000hz.1ch.s16le
+
+# Chuyển sang WAV để nghe trên mọi player
+sox -r 16000 -e signed -b 16 -c 1 \
+    data/output/pcm/amrwb-pcmdump-*.amrwb.16000hz.1ch.s16le \
+    /tmp/output.wav
+
+# Xem waveform (nếu có sox)
+sox data/output/pcm/*.s16le -n \
+    -r 16000 -e signed -b 16 -c 1 \
+    stat
+```
+
+### Troubleshooting — AMR-WB PCM Dump
+
+| Triệu chứng | Nguyên nhân | Cách fix |
+|---|---|---|
+| `libopencore-amrwb không tìm thấy` | Chưa cài thư viện | `apt-get install libopencore-amrwb-dev` |
+| `Build gateway thất bại` | CGO_ENABLED=0 hoặc thiếu header | `export CGO_ENABLED=1` rồi kiểm tra `apt list --installed \| grep amrwb` |
+| PCM file **trống** (0 bytes) | Binary không link amrwb | `ldd bin/gateway-amrwb \| grep amrwb` — phải thấy `libopencore-amrwb.so` |
+| `Decode errors: +200` | Binary là stub (no CGO) | Dùng đúng binary: `bin/media-ai-gateway-amrwb`, không phải `bin/media-ai-gateway` |
+| `Gateway not ready (HTTP 000)` | Port 8080 bị chặn firewall | `sudo ufw allow 8080` hoặc chạy trên loopback |
+| PCM có data nhưng **toàn 0** | opencore decode silent | Kiểm tra AMR file hợp lệ: `xxd speech.amr \| head -1` phải thấy `#!AMR-WB` |
+| `PCM size quá nhỏ` | Jitter buffer drop nhiều packet | Kiểm tra UDP không bị mất gói: `ss -s` khi chạy test |
+| `Non-zero < 10%` | File AMR là silence | Thay bằng file có tiếng nói thực |
+
+---
+
 ## Troubleshooting
 
 | Triệu chứng | Nguyên nhân | Cách fix |
