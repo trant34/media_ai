@@ -6,38 +6,41 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"media-ai-gateway/internal/ingress/rawrtp"
+	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/session"
 )
 
-func (s *Server) createSession(c *gin.Context) {
-	var req CreateSessionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+// notifyEvent handles POST /v1/vonras/call-sessions/:callId/notify-event.
+// Dispatches on sessionEvent.event: BEGIN → 200 OK; ANSWER → create session + allocate RTP port.
+func (s *Server) notifyEvent(c *gin.Context) {
+	var event SessionEvent
+	if err := c.ShouldBindJSON(&event); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
 		return
 	}
-
-	switch {
-	case req.ID == "":
-		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "id is required"})
-		return
-	case req.Codec == "":
-		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "codec is required"})
-		return
-	case req.SampleRate == 0:
-		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "sample_rate is required"})
-		return
-	}
-
-	switch req.SourceType {
-	case "", "raw_rtp", "webrtc":
-		// valid
+	callID := c.Param("callId")
+	switch strings.ToUpper(event.Event) {
+	case "BEGIN":
+		c.JSON(http.StatusOK, gin.H{})
+	case "ANSWER":
+		s.handleAnswer(c, callID, &event)
 	default:
-		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "source_type must be 'raw_rtp' or 'webrtc'"})
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "unknown event: " + event.Event})
+	}
+}
+
+// handleAnswer processes ANSWER event: create session + allocate per-session RTP port.
+func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent) {
+	codec, sampleRate, supported := serviceToCodec(event.SelectedService)
+	if !supported {
+		// Service not yet handled (e.g. fun_calling) — acknowledge without creating session.
+		c.JSON(http.StatusOK, gin.H{})
 		return
 	}
 
@@ -46,23 +49,13 @@ func (s *Server) createSession(c *gin.Context) {
 		return
 	}
 
-	channels := req.Channels
-	if channels == 0 {
-		channels = 1
-	}
-
 	sess, err := s.sessionMgr.Create(session.SessionConfig{
-		ID:          req.ID,
-		SourceType:  req.SourceType,
-		SSRC:        req.SSRC,
-		PayloadType: req.PayloadType,
-		Codec:       req.Codec,
-		SampleRate:  req.SampleRate,
-		Channels:    channels,
-		Language:    req.Language,
-		Task:        req.Task,
-		CallbackURL: req.CallbackURL,
-		RemoteAddr:  req.RemoteAddr,
+		ID:         callID,
+		SourceType: "raw_rtp",
+		Codec:      codec,
+		SampleRate: sampleRate,
+		Channels:   1,
+		Task:       event.SelectedService,
 	})
 	if err != nil {
 		switch {
@@ -77,9 +70,8 @@ func (s *Server) createSession(c *gin.Context) {
 	}
 	sess.GatewayID = s.cfg.GatewayID
 
-	// Allocate a dedicated UDP port for raw_rtp sessions (§5.4).
 	var rtpPort int
-	if req.SourceType == "raw_rtp" && s.portAlloc != nil {
+	if s.portAlloc != nil {
 		port, err := s.portAlloc.Acquire()
 		if err != nil {
 			s.sessionMgr.Close(sess.ID)
@@ -87,7 +79,6 @@ func (s *Server) createSession(c *gin.Context) {
 			return
 		}
 		if err := rawrtp.StartSessionListener(sess, s.cfg.RTPBindIP, port, s.portAlloc); err != nil {
-			// Bind failed before goroutine started — release manually.
 			s.portAlloc.Release(port)
 			s.sessionMgr.Close(sess.ID)
 			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "rtp: " + err.Error()})
@@ -98,8 +89,6 @@ func (s *Server) createSession(c *gin.Context) {
 
 	cbSink, err := s.coord.Start(sess)
 	if err != nil {
-		// Closing the session cancels sess.Ctx, which causes the listener goroutine
-		// to exit and release the port asynchronously.
 		s.sessionMgr.Close(sess.ID)
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "pipeline: " + err.Error()})
 		return
@@ -113,12 +102,25 @@ func (s *Server) createSession(c *gin.Context) {
 	if rtpPort != 0 {
 		resp.RTPIP = s.cfg.RTPPublicIP
 		resp.RTPPort = rtpPort
+		resp.LocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, rtpPort, 0)
 	}
 	c.JSON(http.StatusCreated, resp)
 }
 
-func (s *Server) getSession(c *gin.Context) {
-	sess, ok := s.sessionMgr.Get(c.Param("id"))
+// serviceToCodec maps DCSF selectedService to codec + sampleRate.
+// Returns ok=false for services not yet handled (caller should ACK without creating session).
+func serviceToCodec(service string) (codec string, sampleRate int, ok bool) {
+	switch strings.ToLower(service) {
+	case "realtime_translation", "speech_to_text":
+		return "PCMU", 8000, true
+	default:
+		return "", 0, false
+	}
+}
+
+// getCallSession handles GET /v1/vonras/call-sessions/:callId.
+func (s *Server) getCallSession(c *gin.Context) {
+	sess, ok := s.sessionMgr.Get(c.Param("callId"))
 	if !ok {
 		c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
 		return
@@ -126,8 +128,59 @@ func (s *Server) getSession(c *gin.Context) {
 	c.JSON(http.StatusOK, sessionToResponse(sess))
 }
 
-func (s *Server) deleteSession(c *gin.Context) {
-	if !s.sessionMgr.Close(c.Param("id")) {
+// ctrlResult handles POST /v1/vonras/call-sessions/:callId/ctrl-result.
+// Updates mediaResources (tAccess.endpoint → remote_addr) and optional callbackUrl.
+func (s *Server) ctrlResult(c *gin.Context) {
+	var req CtrlResultRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
+		return
+	}
+	id := c.Param("callId")
+
+	patch := session.SessionPatch{
+		CallbackURL: req.CallbackURL,
+	}
+	if req.MediaResources != nil {
+		patch.MediaResources = &pipeline.MediaResources{
+			TCore: pipeline.MediaResource{
+				ContextID:     req.MediaResources.TCore.ContextID,
+				TerminationID: req.MediaResources.TCore.TerminationID,
+				Endpoint:      req.MediaResources.TCore.Endpoint,
+			},
+			TAccess: pipeline.MediaResource{
+				ContextID:     req.MediaResources.TAccess.ContextID,
+				TerminationID: req.MediaResources.TAccess.TerminationID,
+				Endpoint:      req.MediaResources.TAccess.Endpoint,
+			},
+		}
+		patch.RemoteAddr = req.MediaResources.TAccess.Endpoint
+	}
+
+	sess, err := s.sessionMgr.Update(id, patch)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		}
+		return
+	}
+
+	if req.CallbackURL != "" {
+		if cu, ok := s.coord.(CallbackSinkUpdater); ok {
+			if cbSink := cu.UpdateCallbackSink(id, req.CallbackURL); cbSink != nil {
+				s.RegisterCallbackSink(cbSink)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, sessionToResponse(sess))
+}
+
+// deleteCallSession handles DELETE /v1/vonras/call-sessions/:callId.
+func (s *Server) deleteCallSession(c *gin.Context) {
+	if !s.sessionMgr.Close(c.Param("callId")) {
 		c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
 		return
 	}
@@ -195,6 +248,14 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE media_ai_sessions_max gauge\n")
 	fmt.Fprintf(w, "media_ai_sessions_max %d\n", s.sessionMgr.MaxSessions())
 
+	fmt.Fprintf(w, "# HELP media_ai_sessions_created_total Total sessions created since startup\n")
+	fmt.Fprintf(w, "# TYPE media_ai_sessions_created_total counter\n")
+	fmt.Fprintf(w, "media_ai_sessions_created_total %d\n", s.sessionMgr.CreatedTotal())
+
+	fmt.Fprintf(w, "# HELP media_ai_sessions_closed_total Total sessions closed since startup\n")
+	fmt.Fprintf(w, "# TYPE media_ai_sessions_closed_total counter\n")
+	fmt.Fprintf(w, "media_ai_sessions_closed_total %d\n", s.sessionMgr.ClosedTotal())
+
 	fmt.Fprintf(w, "# HELP media_ai_ai_streams_active Active AI gRPC stream count\n")
 	fmt.Fprintf(w, "# TYPE media_ai_ai_streams_active gauge\n")
 	fmt.Fprintf(w, "media_ai_ai_streams_active %d\n", s.aiMgr.Count())
@@ -235,6 +296,10 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE media_ai_dispatcher_queue_len gauge\n")
 	fmt.Fprintf(w, "media_ai_dispatcher_queue_len %d\n", s.dispatcher.QueueLen())
 
+	fmt.Fprintf(w, "# HELP media_ai_dispatcher_pushed_total Total results pushed into dispatcher queue\n")
+	fmt.Fprintf(w, "# TYPE media_ai_dispatcher_pushed_total counter\n")
+	fmt.Fprintf(w, "media_ai_dispatcher_pushed_total %d\n", ds.Pushed)
+
 	fmt.Fprintf(w, "# HELP media_ai_dispatcher_sent_total Total results sent via callback\n")
 	fmt.Fprintf(w, "# TYPE media_ai_dispatcher_sent_total counter\n")
 	fmt.Fprintf(w, "media_ai_dispatcher_sent_total %d\n", ds.Sent)
@@ -266,6 +331,26 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# HELP media_ai_ai_reconnects_total Total AI gRPC stream reconnect attempts\n")
 	fmt.Fprintf(w, "# TYPE media_ai_ai_reconnects_total counter\n")
 	fmt.Fprintf(w, "media_ai_ai_reconnects_total %d\n", aiSt.TotalRetries)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_last_ms Latency of the most recently received result (audio end_ms to gateway recv, ms)\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_last_ms gauge\n")
+	fmt.Fprintf(w, "media_ai_ai_result_latency_last_ms %d\n", aiSt.LatencyLast)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_ms_total Cumulative sum of result latencies (ms); divide by count for average\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_ms_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_result_latency_ms_total %d\n", aiSt.LatencySum)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_count_total Number of results with valid latency measurement (end_ms set by AI)\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_count_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_result_latency_count_total %d\n", aiSt.LatencyCount)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_first_result_ms_total Cumulative sum of first-result latencies per stream (ms)\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_first_result_ms_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_first_result_ms_total %d\n", aiSt.LatencyFirstSum)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_first_result_count_total Number of streams that produced at least one result\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_first_result_count_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_first_result_count_total %d\n", aiSt.LatencyFirstCount)
 
 	// --- Result metrics ---
 	fmt.Fprintf(w, "# HELP media_ai_result_partial_total Total partial recognition results delivered\n")
@@ -330,6 +415,29 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE media_ai_gateway_nodes_registered gauge\n")
 	fmt.Fprintf(w, "media_ai_gateway_nodes_registered %d\n", s.registry.Len())
 
+	// --- Jitter buffer aggregate (type assert — graceful nếu coord không implement) ---
+	type jitterStatsGetter interface {
+		AggregateJitterStats() (received, released, dropped, lost uint64)
+	}
+	if js, ok := s.coord.(jitterStatsGetter); ok {
+		recv, rel, drop, lost := js.AggregateJitterStats()
+		fmt.Fprintf(w, "# HELP media_ai_jitter_received_total Total RTP packets received by jitter buffers\n")
+		fmt.Fprintf(w, "# TYPE media_ai_jitter_received_total counter\n")
+		fmt.Fprintf(w, "media_ai_jitter_received_total %d\n", recv)
+
+		fmt.Fprintf(w, "# HELP media_ai_jitter_released_total Total packets released from jitter buffers in order\n")
+		fmt.Fprintf(w, "# TYPE media_ai_jitter_released_total counter\n")
+		fmt.Fprintf(w, "media_ai_jitter_released_total %d\n", rel)
+
+		fmt.Fprintf(w, "# HELP media_ai_jitter_dropped_total Total packets dropped (late arrival, duplicate, output full)\n")
+		fmt.Fprintf(w, "# TYPE media_ai_jitter_dropped_total counter\n")
+		fmt.Fprintf(w, "media_ai_jitter_dropped_total %d\n", drop)
+
+		fmt.Fprintf(w, "# HELP media_ai_jitter_lost_total Total detected sequence gaps (packets never arrived)\n")
+		fmt.Fprintf(w, "# TYPE media_ai_jitter_lost_total counter\n")
+		fmt.Fprintf(w, "media_ai_jitter_lost_total %d\n", lost)
+	}
+
 	fmt.Fprintf(w, "# HELP media_ai_scrape_timestamp_ms Unix millisecond timestamp of this scrape\n")
 	fmt.Fprintf(w, "# TYPE media_ai_scrape_timestamp_ms gauge\n")
 	fmt.Fprintf(w, "media_ai_scrape_timestamp_ms %d\n", now)
@@ -367,6 +475,58 @@ func (s *Server) stats(c *gin.Context) {
 	})
 }
 
+func (s *Server) connections(c *gin.Context) {
+	resp := ConnectionsResponse{}
+
+	// AI gRPC workers.
+	if s.grpcPool != nil {
+		aiSt := s.aiMgr.Stats()
+		for _, addr := range s.grpcPool.Addrs() {
+			resp.AIWorkers = append(resp.AIWorkers, AIWorkerConn{
+				Addr:         addr,
+				State:        s.grpcPool.State(addr).String(),
+				ActiveStream: s.aiMgr.Count(),
+				Latency: AILatencyStats{
+					LastMs:           aiSt.LatencyLast,
+					AvgMs:            aiSt.AvgLatencyMs(),
+					Count:            aiSt.LatencyCount,
+					AvgFirstResultMs: aiSt.AvgFirstResultMs(),
+				},
+			})
+		}
+	}
+
+	// Callback HTTP/2.
+	if s.callbackClient != nil {
+		st := s.callbackClient.PreconnectState()
+		resp.Callback = CallbackConn{
+			URL:       st.URL,
+			Connected: st.Connected,
+			Error:     st.Error,
+		}
+		if !st.PreconnectAt.IsZero() {
+			resp.Callback.PreconnectAt = st.PreconnectAt.UTC().Format(time.RFC3339)
+		}
+	}
+
+	// RTP connections.
+	if s.portAlloc != nil {
+		total := s.portAlloc.Total()
+		avail := s.portAlloc.Available()
+		resp.RTP = RTPConnSummary{
+			PerSessionOpen:     total - avail,
+			PerSessionCapacity: total,
+			SharedIngress:      s.ingress != nil,
+		}
+	} else {
+		resp.RTP = RTPConnSummary{
+			SharedIngress: s.ingress != nil,
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 func sessionToResponse(sess *session.Session) SessionResponse {
 	return SessionResponse{
 		SessionID:  sess.ID,
@@ -378,5 +538,106 @@ func sessionToResponse(sess *session.Session) SessionResponse {
 		Language:   sess.Language,
 		Task:       sess.Task,
 		CreatedAt:  sess.CreatedAt,
+	}
+}
+
+// buildNonDcMedia xây dựng SDP mô tả RTP endpoint của gateway (dùng cho 3GPP MRM API).
+// DCAS dùng kết quả này làm remoteNonDcMedia khi gọi MF MRM POST /contexts.
+func buildNonDcMedia(codec string, sampleRate, channels, rtpPort int, payloadType uint8) *NonDcMedia {
+	upper := strings.ToUpper(codec)
+
+	ch := channels
+	if ch <= 0 {
+		ch = 1
+	}
+
+	pt := int(payloadType) // 0 = dùng default của codec
+
+	var maxptime int
+	var rtpmap, fmtp string
+
+	switch upper {
+	case "PCMU":
+		// PT 0 là static assignment cho PCMU — không thay đổi dù payloadType=0
+		maxptime = 20
+		if ch > 1 {
+			rtpmap = fmt.Sprintf("rtpmap:%d PCMU/%d/%d", pt, sampleRate, ch)
+		} else {
+			rtpmap = fmt.Sprintf("rtpmap:%d PCMU/%d", pt, sampleRate)
+		}
+
+	case "PCMA":
+		if pt == 0 {
+			pt = 8
+		}
+		maxptime = 20
+		if ch > 1 {
+			rtpmap = fmt.Sprintf("rtpmap:%d PCMA/%d/%d", pt, sampleRate, ch)
+		} else {
+			rtpmap = fmt.Sprintf("rtpmap:%d PCMA/%d", pt, sampleRate)
+		}
+
+	case "OPUS":
+		if pt == 0 {
+			pt = 111
+		}
+		if ch < 2 {
+			ch = 2 // Opus default 2 channels trong SDP
+		}
+		maxptime = 60
+		rtpmap = fmt.Sprintf("rtpmap:%d opus/%d/%d", pt, sampleRate, ch)
+		fmtp = fmt.Sprintf("fmtp:%d minptime=10;useinbandfec=1", pt)
+
+	case "AMR", "AMR-NB":
+		if pt == 0 {
+			pt = 96
+		}
+		maxptime = 80
+		rtpmap = fmt.Sprintf("rtpmap:%d AMR/8000", pt)
+		fmtp = fmt.Sprintf("fmtp:%d octet-align=1", pt)
+
+	case "AMR-WB", "AMRWB":
+		if pt == 0 {
+			pt = 97
+		}
+		maxptime = 80
+		rtpmap = fmt.Sprintf("rtpmap:%d AMR-WB/16000", pt)
+		fmtp = fmt.Sprintf("fmtp:%d octet-align=1", pt)
+
+	case "EVS":
+		if pt == 0 {
+			pt = 100
+		}
+		if sampleRate == 0 {
+			sampleRate = 16000
+		}
+		maxptime = 100
+		rtpmap = fmt.Sprintf("rtpmap:%d EVS/%d", pt, sampleRate)
+		bw := "wb"
+		if sampleRate <= 8000 {
+			bw = "nb"
+		}
+		fmtp = fmt.Sprintf("fmtp:%d br=13.2;bw=%s", pt, bw)
+
+	default:
+		if pt == 0 {
+			pt = 96
+		}
+		rtpmap = fmt.Sprintf("rtpmap:%d %s/%d", pt, codec, sampleRate)
+	}
+
+	if maxptime == 0 {
+		maxptime = 20
+	}
+
+	aLines := []string{rtpmap}
+	if fmtp != "" {
+		aLines = append(aLines, fmtp)
+	}
+	aLines = append(aLines, "ptime:20", fmt.Sprintf("maxptime:%d", maxptime), "recvonly")
+
+	return &NonDcMedia{
+		SDPMLine:  fmt.Sprintf("audio %d RTP/AVP %d", rtpPort, pt),
+		SDPALines: aLines,
 	}
 }

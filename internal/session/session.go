@@ -38,10 +38,11 @@ type Session struct {
 	Channels    int
 	Language    string
 	Task        string
-	CallbackURL string
-	PeerID      string
-	TrackID     string
-	RemoteAddr  string // expected source UDP addr "ip:port"; used as fallback routing key
+	CallbackURL    string
+	PeerID         string
+	TrackID        string
+	RemoteAddr     string                   // expected source UDP addr "ip:port"; used as fallback routing key
+	MediaResources *pipeline.MediaResources // H.248 termination info set via PATCH
 
 	PacketQueue chan pipeline.MediaPacket
 	AudioQueue  chan pipeline.AudioChunk

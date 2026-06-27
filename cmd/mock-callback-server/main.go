@@ -37,17 +37,31 @@ import (
 	"golang.org/x/net/http2/h2c"
 )
 
+type mediaResource struct {
+	ContextID     string `json:"contextId"`
+	TerminationID string `json:"terminationId"`
+	Endpoint      string `json:"endpoint"`
+}
+
+type mediaResources struct {
+	TCore   mediaResource `json:"tCore"`
+	TAccess mediaResource `json:"tAccess"`
+}
+
 // callbackBody mirrors JSON body gửi bởi HTTPCallbackSink.
 type callbackBody struct {
-	EventType  string  `json:"event_type"`
-	SessionID  string  `json:"session_id"`
-	Text       string  `json:"text"`
-	IsFinal    bool    `json:"is_final"`
-	Confidence float64 `json:"confidence"`
-	Language   string  `json:"language"`
-	Seq        int     `json:"seq"`
-	StartMS    int64   `json:"start_ms"`
-	EndMS      int64   `json:"end_ms"`
+	EventType      string          `json:"event_type"`
+	SessionID      string          `json:"session_id"`
+	StreamID       string          `json:"stream_id"`
+	SourceType     string          `json:"source_type"`
+	Text           string          `json:"text"`
+	IsFinal        bool            `json:"is_final"`
+	Confidence     float64         `json:"confidence"`
+	Language       string          `json:"language"`
+	Seq            int             `json:"seq"`
+	StartMS        int64           `json:"start_ms"`
+	EndMS          int64           `json:"end_ms"`
+	MediaResources *mediaResources `json:"mediaResources,omitempty"`
 }
 
 var enc = json.NewEncoder(os.Stdout)
@@ -83,16 +97,19 @@ func main() {
 		mu.Unlock()
 
 		emit(map[string]any{
-			"event":      "callback",
-			"event_type": body.EventType,
-			"session_id": body.SessionID,
-			"text":       body.Text,
-			"is_final":   body.IsFinal,
-			"confidence": body.Confidence,
-			"language":   body.Language,
-			"seq":        body.Seq,
-			"start_ms":   body.StartMS,
-			"end_ms":     body.EndMS,
+			"event":          "callback",
+			"event_type":     body.EventType,
+			"session_id":     body.SessionID,
+			"stream_id":      body.StreamID,
+			"source_type":    body.SourceType,
+			"text":           body.Text,
+			"is_final":       body.IsFinal,
+			"confidence":     body.Confidence,
+			"language":       body.Language,
+			"seq":            body.Seq,
+			"start_ms":       body.StartMS,
+			"end_ms":         body.EndMS,
+			"mediaResources": body.MediaResources,
 		})
 
 		w.WriteHeader(http.StatusOK)

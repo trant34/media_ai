@@ -160,8 +160,10 @@ AudioQueue (per-session, bounded)
    v
 AI Stream Manager
    | WorkerRegistry.Select(language, task) → chọn worker ít tải nhất
-   | RoutingDialer.Dial → grpc.NewClient + conn.NewStream
-   | Encoding: JSON-over-gRPC  (/speech.SpeechStream/Recognize)
+   | RoutingDialer.Dial → SharedConnPool.getOrCreate(addr) + conn.NewStream
+   | Encoding: protobuf binary  (/speech.SpeechStream/Recognize)
+   | 1 shared grpc.ClientConn per worker addr — tất cả session multiplex HTTP/2
+   | Keepalive PING mỗi 30s — giữ conn sống qua đoạn im lặng / firewall NAT
    | Reconnect tự động khi stream lỗi (max_retry lần, exponential backoff)
    v
 AI Worker  (faster-whisper / PhoWhisper / translation)
@@ -267,9 +269,15 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
   "gateway_id": "gw-02",
   "rtp_ip": "10.10.10.22",
   "rtp_port": 40028,
-  "status": "created"
+  "status": "created",
+  "local_non_dc_media": {
+    "sdpmLine": "audio 40028 RTP/AVP 0",
+    "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+  }
 }
 ```
+
+> `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật). DCAS dùng field này làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
 
 ### State quản lý
 
@@ -1014,14 +1022,36 @@ gRPC Recv loop
    +- final   → ResultQueue (blocking, đảm bảo delivery)
 ```
 
-### Transport: JSON-over-gRPC
+### Transport: protobuf binary
 
-Gateway hiện dùng JSON encoding thay protobuf binary để tránh bước code generation.
+Gateway dùng protobuf binary encoding trực tiếp qua `protowire` — không cần code generation.
 
-- Codec đăng ký toàn cục: `encoding.RegisterCodec(jsonCodec{})` (name: `"json"`).
-- Mỗi stream mở với `grpc.ForceCodec(jsonCodec{})` → content-type: `application/grpc+json`.
-- AI worker phải đăng ký cùng JSON codec (hoặc dùng gRPC transcoding HTTP/JSON).
-- Khi sẵn sàng dùng protobuf binary: thay `NewGRPCDialFunc` bằng implementation dùng generated code, không cần sửa interface `StreamClient`.
+- Mỗi stream mở với `grpc.ForceCodec(protoCodec{})` → content-type: `application/grpc+proto`.
+- `protoCodec.Marshal` encode `*audioChunkWire` → binary; `Unmarshal` decode binary → `*recognitionResultWire`.
+- Field numbers theo `internal/ai/proto/speech.proto`; confidence dùng `Fixed32` (field 7).
+- AI worker phải hỗ trợ content-type `application/grpc+proto` (chuẩn gRPC mặc định).
+
+### Shared Connection Pool
+
+`SharedConnPool` giữ một `*grpc.ClientConn` dùng chung per AI worker address:
+
+```
+Startup:
+  SharedConnPool.Preconnect("ai-worker:50051")
+    → grpc.NewClient(..., keepalive.ClientParameters{Time:30s, PermitWithoutStream:true})
+    → conn.Connect()  (async TCP dial)
+    → log "ai: gRPC connection initiated"
+
+Per session (POST /v1/sessions):
+  SharedConnPool.getOrCreate(addr) → reuse existing conn
+  conn.NewStream(...)  → 1 grpc.ClientStream mới (HTTP/2 stream ID mới)
+  (không tạo TCP connection mới, không đóng conn khi session kết thúc)
+```
+
+Lợi ích:
+- **HTTP/2 multiplexing**: N session = N stream trên 1 TCP connection thay vì N connections.
+- **Keepalive**: PING mỗi 30s (`keepalive_time_sec`), đóng conn nếu không PONG trong 10s (`keepalive_timeout_sec`). `PermitWithoutStream: true` đảm bảo PING được gửi ngay cả khi không có session active.
+- **Pre-connect**: conn được thiết lập khi gateway khởi động, không chờ session đầu tiên.
 
 ### Proto contract
 
@@ -1058,17 +1088,24 @@ message RecognitionResult {
 }
 ```
 
-### Wire format JSON
+### Wire format
 
-`AudioChunk` được serialize với snake_case JSON tags (khác với Go struct field names):
+`AudioChunk` được serialize theo field numbers trong `speech.proto`:
 
-| Go field | JSON key |
-|----------|----------|
-| `SessionID` | `session_id` |
-| `PCM` | `pcm` (base64) |
-| `SampleRate` | `sample_rate` |
-| `Language` *(thêm tại dialer)* | `language` |
-| `Task` *(thêm tại dialer)* | `task` |
+| Field | Number | Wire type | Ghi chú |
+|-------|--------|-----------|---------|
+| `session_id` | 1 | bytes | |
+| `stream_id` | 2 | bytes | |
+| `pcm` | 3 | bytes | PCM S16LE raw |
+| `sample_rate` | 4 | varint | Hz |
+| `channels` | 5 | varint | |
+| `timestamp_ms` | 6 | varint | |
+| `duration_ms` | 7 | varint | |
+| `end_of_stream` | 8 | varint | bool |
+| `language` | 9 | bytes | BCP-47 |
+| `task` | 10 | bytes | "transcribe"\|"translate" |
+
+`RecognitionResult` field 7 (`confidence`) dùng `fixed32` (IEEE 754 float32 little-endian).
 
 ### Config
 
@@ -1081,6 +1118,8 @@ ai:
   stream_timeout_sec: 300
   max_retry: 3
   retry_backoff_ms: 1000
+  keepalive_time_sec: 30          # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
+  keepalive_timeout_sec: 10       # đóng conn nếu không nhận PONG trong N giây
 ```
 
 ---
@@ -1600,40 +1639,46 @@ Quản lý cấu hình runtime cho Gateway và AI.
 
 ### Config mẫu
 
+Config đầy đủ — xem `internal/config/config.go Default()` để biết giá trị mặc định. Tham khảo `config/gateway.yaml` để xem tất cả field có comment.
+
 ```yaml
 gateway:
   name: "media-ai-gateway"
+  id: "gw-01"
   raw_rtp_enabled: true
   webrtc_enabled: true
 
 server:
   http_addr: ":8080"
-  metrics_addr: ":9090"
+  cert_file: ""              # để trống → h2c cleartext
+  key_file: ""
+  metrics_addr: ""           # "" = phục vụ /metrics trên cùng http_addr
   shutdown_timeout_sec: 10
 
 rtp:
-  listen_ip: "0.0.0.0"
-  port_start: 40000
-  port_end: 40100
-  socket_read_buffer: 4194304
-  receiver_workers: 2
+  listen_addr: ":5004"       # shared UDP ingress
+  public_ip: ""              # IP advertise cho caller (per-session port)
+  bind_ip: ""                # IP bind per-session socket; "" = all
+  port_start: 0              # 0 = tắt per-session port pool
+  port_end: 0
+  socket_read_buffer: 4194304  # SO_RCVBUF 4 MiB
 
 webrtc:
-  enabled: true
   stun_servers:
     - "stun:stun.l.google.com:19302"
   turn_servers: []
-  max_peer_connections: 5000
-  audio_codecs:
-    - "opus"
-    - "PCMU"
-    - "PCMA"
-  enable_datachannel_result: true
+  nat1to1_ips: []
+  ice_port_min: 0
+  ice_port_max: 0
+  dc_proxy_url: ""           # IMS DataChannel Mode 2.1 (HTTP Proxy)
+  dc_udp_proxy_addr: ""      # IMS DataChannel Mode 2.2 (UDP Proxy, AC.6-2)
 
 session:
   max_sessions: 10000
   idle_timeout_sec: 30
+  gc_interval_sec: 5
   per_session_packet_queue: 128
+  per_session_audio_queue: 128
   per_session_result_queue: 64
 
 pipeline:
@@ -1641,11 +1686,13 @@ pipeline:
   audio_job_queue_size: 8192
   jitter_buffer_ms: 60
   max_packet_late_ms: 120
+  packet_time_ms: 20
 
 audio:
   output_sample_rate: 16000
   output_channels: 1
   chunk_ms: 500
+  pcm_dump_dir: ""           # ghi raw PCM decode ra file để verify; "" = tắt
 
 ai:
   grpc_target: "ai-router:50051"
@@ -1654,17 +1701,28 @@ ai:
   send_timeout_ms: 500
   stream_timeout_sec: 300
   max_retry: 3
+  retry_backoff_ms: 1000
+  keepalive_time_sec: 30     # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
+  keepalive_timeout_sec: 10  # đóng conn nếu không nhận PONG trong N giây
 
 result:
   dispatcher_workers: 16
   queue_size: 4096
   drop_partial_when_full: true
-  keep_final_when_possible: true
+  send_timeout_ms: 2000
 
 callback:
+  url: ""                    # pre-connect target khi khởi động; "" = không pre-connect
   timeout_ms: 1000
   max_retry: 3
   retry_backoff_ms: 200
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau N ms idle; 0 = tắt
+  ping_timeout_ms: 15000       # đóng conn nếu không nhận PONG trong N ms
+
+log:
+  level: "info"    # debug | info | warn | error
+  format: "json"
+  monitor_interval_sec: 60   # in thống kê định kỳ mỗi N giây; 0 = tắt
 ```
 
 ---
@@ -1744,7 +1802,7 @@ internal/
 
   ai/
     grpc_client.go      — StreamClient interface + Stream/Manager/Config
-    grpc_dialer.go      — NewGRPCDialFunc (JSON-over-gRPC transport)
+    grpc_dialer.go      — SharedConnPool (protobuf binary, shared conn, keepalive)
     null_dialer.go      — NullDialer (dev/smoke-test)
     routing_dialer.go   — RoutingDialer: WorkerRegistry.Select → GRPCDialFunc
     worker_info.go      — WorkerInfo, load scoring, capability matching
@@ -1759,6 +1817,9 @@ internal/
     callback_pool.go    — CallbackPool (dedicated worker pool per-sink)
     datachannel.go      — DataChannelSink (WebRTC DataChannel, JSON, backpressure)
     websocket.go        — WebSocket/SSE Sink (TODO: §5.20)
+
+  monitor/
+    monitor.go          — Monitor: periodic slog stats (sessions, AI streams, pool, dispatcher, gRPC state, callback H/2, RTP ports)
 ```
 
 ---
@@ -1797,11 +1858,16 @@ Response:
   "rtp_ip": "10.10.10.22",
   "rtp_port": 40028,
   "status": "created",
-  "source_type": "raw_rtp"
+  "source_type": "raw_rtp",
+  "local_non_dc_media": {
+    "sdpmLine": "audio 40028 RTP/AVP 0",
+    "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+  }
 }
 ```
 
-> `rtp_ip` và `rtp_port` chỉ có khi `rtp.port_start > 0` (per-session port allocation được bật).
+> `rtp_ip`, `rtp_port`, `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật).  
+> `local_non_dc_media` là SDP mô tả gateway endpoint — DCAS dùng làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
 >
 > **`ssrc`** (optional): nếu SBC/MGW gửi packet có SSRC cố định, cung cấp để shared ingress route chính xác.
 >

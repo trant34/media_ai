@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"media-ai-gateway/internal/pipeline"
 )
 
-// Sentinel errors trả về bởi Create.
+// Sentinel errors.
 var (
-	ErrMaxSessions    = errors.New("session: max sessions reached")
-	ErrDuplicateID    = errors.New("session: duplicate session ID")
+	ErrMaxSessions = errors.New("session: max sessions reached")
+	ErrDuplicateID = errors.New("session: duplicate session ID")
+	ErrNotFound    = errors.New("session: not found")
 )
 
 // ManagerConfig giữ cấu hình cho Manager.
@@ -54,6 +56,14 @@ type SessionConfig struct {
 	RemoteAddr  string // expected source UDP addr "ip:port" for raw_rtp addr-based routing
 }
 
+// SessionPatch giữ các field có thể cập nhật sau khi session được tạo.
+// Field rỗng/nil = không thay đổi.
+type SessionPatch struct {
+	RemoteAddr     string                   // cập nhật addrIndex khi thay đổi
+	CallbackURL    string                   // cập nhật sink qua coordinator
+	MediaResources *pipeline.MediaResources // H.248 termination info từ DCAS
+}
+
 // Manager quản lý lifecycle của tất cả media session.
 //
 // Mọi method đều goroutine-safe. Background GC được khởi chạy bởi Run().
@@ -65,6 +75,9 @@ type Manager struct {
 	addrIndex  map[string]string // RemoteAddr → session ID; chỉ chứa RemoteAddr != ""
 	peerIndex  map[string]string // PeerID     → session ID; chỉ chứa PeerID != ""
 	trackIndex map[string]string // TrackID    → session ID; chỉ chứa TrackID != ""
+
+	createdTotal atomic.Uint64
+	closedTotal  atomic.Uint64
 }
 
 // NewManager tạo Manager với config cho trước.
@@ -131,6 +144,7 @@ func (m *Manager) Create(cfg SessionConfig) (*Session, error) {
 	if cfg.TrackID != "" {
 		m.trackIndex[cfg.TrackID] = cfg.ID
 	}
+	m.createdTotal.Add(1)
 	return s, nil
 }
 
@@ -220,7 +234,33 @@ func (m *Manager) Close(id string) bool {
 
 	s.cancel()
 	s.setStatus(StatusClosed)
+	m.closedTotal.Add(1)
 	return true
+}
+
+// Update cập nhật các field của session theo patch. Trả về ErrNotFound nếu session không tồn tại.
+// Goroutine-safe.
+func (m *Manager) Update(id string, patch SessionPatch) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if patch.RemoteAddr != "" && patch.RemoteAddr != s.RemoteAddr {
+		if s.RemoteAddr != "" {
+			delete(m.addrIndex, s.RemoteAddr)
+		}
+		s.RemoteAddr = patch.RemoteAddr
+		m.addrIndex[patch.RemoteAddr] = id
+	}
+	if patch.CallbackURL != "" {
+		s.CallbackURL = patch.CallbackURL
+	}
+	if patch.MediaResources != nil {
+		s.MediaResources = patch.MediaResources
+	}
+	return s, nil
 }
 
 // Count trả về số session đang active.
@@ -232,6 +272,12 @@ func (m *Manager) Count() int {
 
 // MaxSessions trả về giới hạn session tối đa (dùng để tính % sử dụng).
 func (m *Manager) MaxSessions() int { return m.cfg.MaxSessions }
+
+// CreatedTotal trả về tổng số session đã được tạo kể từ khi khởi động.
+func (m *Manager) CreatedTotal() uint64 { return m.createdTotal.Load() }
+
+// ClosedTotal trả về tổng số session đã bị đóng kể từ khi khởi động.
+func (m *Manager) ClosedTotal() uint64 { return m.closedTotal.Load() }
 
 // Run khởi động vòng lặp GC nền, kiểm tra idle timeout theo GCInterval.
 // Blocks cho đến khi ctx bị cancel.

@@ -1,0 +1,121 @@
+# Media AI Gateway — cấu hình IMS/Telecom deployment
+#
+# Profile này dành cho triển khai trong hạ tầng IMS:
+#
+#   DCAS (IMS AS) ──POST /v1/sessions──► Gateway  (tạo session, cung cấp callback_url → MF)
+#
+#   MF  ──RTP──►  Gateway  ──gRPC──►  AI Worker (STT)
+#                    │                      │
+#                    └──gRPC result─────────┘
+#                    │
+#                    └──HTTP/2 callback──►  MF HTTP/2 server (nhận kết quả ASR)
+#
+# Đặc điểm:
+#   - Per-session UDP port pool để SBC/B2BUA gửi RTP trực tiếp đến đúng port
+#   - AMR-WB / AMR-NB codec (cần build với -tags opencore_amrwb)
+#   - WebRTC tắt (IMS dùng RTP thuần, không cần ICE/DTLS)
+#   - Callback về IMS AS qua H2C (AS thường nằm trong cùng internal network)
+#   - TLS control plane để gateway expose ra ngoài SBC zone
+#
+# Build với AMR-WB:
+#   CGO_ENABLED=1 go build -tags opencore_amrwb -o bin/media-ai-gateway ./cmd/media-ai-gateway
+#
+# Chạy:
+#   ./bin/media-ai-gateway --config config/gateway-ims.yaml
+
+gateway:
+  name: "media-ai-gateway-ims"
+  id: "gw-ims-01"               # mỗi node cần ID riêng trong multi-node
+  raw_rtp_enabled: true          # Raw RTP từ SBC
+  webrtc_enabled: false          # không cần WebRTC trong IMS core
+
+# ── Control plane (TLS, expose cho SBC management) ───────────────────────────
+server:
+  http_addr: ":8443"
+  cert_file: "/etc/tls/gateway.crt"   # cert signed bởi internal CA
+  key_file:  "/etc/tls/gateway.key"
+  metrics_addr: ":9090"               # Prometheus scrape trên port riêng
+  shutdown_timeout_sec: 15
+
+# ── Raw RTP — per-session port pool ──────────────────────────────────────────
+# SBC cần biết địa chỉ RTP endpoint từng session → dùng per-session port.
+# Luồng: POST /v1/sessions → gateway trả rtp_port → SBC gửi RTP đến port đó.
+rtp:
+  listen_addr:         ":5004"        # shared fallback (không dùng nếu port pool đủ)
+  public_ip:           "10.10.1.5"   # IP của gateway nhìn từ SBC (thay giá trị thực)
+  bind_ip:             "10.10.1.5"   # bind per-session socket vào interface cụ thể
+  port_start:          20000          # dải port RTP per-session
+  port_end:            29999          # 10000 port = 10000 session đồng thời tối đa
+  socket_read_buffer:  8388608        # 8 MiB — tránh mất packet burst từ SBC
+
+# ── WebRTC — tắt ─────────────────────────────────────────────────────────────
+webrtc:
+  stun_servers: []
+  turn_servers: []
+  nat1to1_ips:  []
+
+# ── Session manager ───────────────────────────────────────────────────────────
+session:
+  max_sessions:             5000    # giới hạn theo capacity AI worker
+  idle_timeout_sec:         60      # SBC có thể giữ session open dài hơn sau im lặng
+  gc_interval_sec:          10
+  per_session_packet_queue: 256     # buffer lớn hơn cho IMS — SBC có thể burst
+  per_session_audio_queue:  256
+  per_session_result_queue: 128
+
+# ── Audio pipeline ────────────────────────────────────────────────────────────
+# AMR-WB: RTP payload 8kHz/20ms → decode → PCM 16kHz → gửi AI
+# AMR-NB: RTP payload 8kHz/20ms → decode → PCM 8kHz  → gửi AI (nếu AI hỗ trợ)
+pipeline:
+  audio_worker_count:   32      # scale theo số lõi CPU
+  audio_job_queue_size: 16384   # buffer đủ lớn cho burst từ nhiều SBC
+  jitter_buffer_ms:     80      # IMS network thường có jitter cao hơn LAN
+  max_packet_late_ms:   200     # AMR-WB 20ms frame — chấp nhận đến muộn tối đa 200ms
+  packet_time_ms:       20      # AMR-WB và G.711 đều dùng 20ms ptime
+
+# ── Audio output ──────────────────────────────────────────────────────────────
+audio:
+  output_sample_rate: 16000   # AI worker thường cần 16kHz
+  output_channels:    1       # mono
+  chunk_ms:           500     # gửi AI mỗi 500ms (25 frames AMR-WB/G.711 20ms)
+  # pcm_dump_dir: ""          # để trống trên production
+
+# ── AI gRPC ───────────────────────────────────────────────────────────────────
+ai:
+  grpc_target:         "ai-cluster.internal:50051"
+  max_active_streams:  5000         # = max_sessions
+  per_stream_queue_size: 20
+  send_timeout_ms:     500
+  stream_timeout_sec:  600          # IMS call có thể kéo dài >5 phút
+  max_retry:            3
+  retry_backoff_ms:     1000
+  keepalive_time_sec:   30   # PING mỗi 30s — quan trọng cho IMS call dài có đoạn im lặng
+  keepalive_timeout_sec: 10
+
+# ── Result dispatcher ─────────────────────────────────────────────────────────
+result:
+  dispatcher_workers:    32
+  queue_size:            16384
+  drop_partial_when_full: true
+  send_timeout_ms:        2000
+
+# ── HTTP callback → MF HTTP/2 server ─────────────────────────────────────────
+# callback_url được DCAS set per-session trong POST /v1/sessions, trỏ đến HTTP/2 server của MF.
+# MF HTTP/2 server phải hỗ trợ HTTP/2 cleartext (H2C).
+# url (optional): địa chỉ MF callback server để pre-connect khi gateway khởi động;
+#   giúp warm-up H/2 connection pool trước khi có session đầu tiên.
+#   Tất cả session cùng callback host tái sử dụng chung 1 kết nối H/2 duy nhất.
+# Xem docs/callback.md để biết chi tiết format bản tin.
+callback:
+  url: "http://mf-callback.internal:8090"  # pre-connect target khi khởi động (thay bằng host thực)
+  timeout_ms:        2000   # IMS AS thường respond trong <1s; 2s an toàn
+  max_retry:         3
+  retry_backoff_ms:  500    # backoff dài hơn — tránh storm khi AS bận
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle để giữ kết nối
+  ping_timeout_ms:  15000   # đóng connection nếu không nhận PONG trong 15s
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log:
+  level: "info"
+  format: "json"   # structured log cho ELK / Loki
+  monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt

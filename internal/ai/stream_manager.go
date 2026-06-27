@@ -13,29 +13,36 @@ import (
 
 // Sentinel errors trả về bởi Open.
 var (
-	ErrMaxStreams      = errors.New("ai: max active streams reached")
-	ErrDuplicateStream = errors.New("ai: stream already open for session")
+	ErrMaxStreams         = errors.New("ai: max active streams reached")
+	ErrDuplicateStream   = errors.New("ai: stream already open for session")
+	ErrFirstChunkTimeout = errors.New("ai: first chunk deadline exceeded")
+	ErrUnexpectedEOF     = errors.New("ai: stream closed by worker before end of stream")
+	ErrRecvIdleTimeout   = errors.New("ai: recv idle timeout")
 )
 
 // Config giữ cấu hình cho AI Stream Manager.
 type Config struct {
-	MaxActiveStreams int
-	QueueSize        int           // per-stream bounded send queue; 0 = direct passthrough (unbounded)
-	SendTimeout      time.Duration // timeout per Send() call; 0 = no timeout
-	StreamTimeout    time.Duration // hard cap on stream lifetime
-	MaxRetries       int           // max reconnect attempts on stream error; 0 = no reconnect
-	RetryBackoff     time.Duration // initial backoff between reconnect attempts; 0 → 1s
+	MaxActiveStreams   int
+	QueueSize          int           // per-stream bounded send queue; 0 = direct passthrough (unbounded)
+	SendTimeout        time.Duration // timeout per Send() call; 0 = no timeout
+	StreamTimeout      time.Duration // hard cap on stream lifetime
+	MaxRetries         int           // max reconnect attempts on stream error; 0 = no reconnect
+	RetryBackoff       time.Duration // initial backoff between reconnect attempts; 0 → 1s
+	FirstChunkTimeout  time.Duration // max wait for first AudioChunk after stream opens; 0 = no deadline
+	RecvIdleTimeout    time.Duration // max wait between consecutive Recv() results; 0 = no timeout
 }
 
 // DefaultConfig trả về cấu hình mặc định phù hợp với production.
 func DefaultConfig() Config {
 	return Config{
-		MaxActiveStreams: 1000,
-		QueueSize:        20,
-		SendTimeout:      500 * time.Millisecond,
-		StreamTimeout:    300 * time.Second,
-		MaxRetries:       3,
-		RetryBackoff:     time.Second,
+		MaxActiveStreams:  1000,
+		QueueSize:         20,
+		SendTimeout:       500 * time.Millisecond,
+		StreamTimeout:     300 * time.Second,
+		MaxRetries:        3,
+		RetryBackoff:      time.Second,
+		FirstChunkTimeout: 3 * time.Second,
+		RecvIdleTimeout:   30 * time.Second,
 	}
 }
 
@@ -44,6 +51,32 @@ type ManagerStats struct {
 	TotalSendErrors uint64
 	TotalRecvErrors uint64
 	TotalRetries    uint64
+
+	// Latency (end_ms-to-recv, ms). Count=0 nếu AI không set end_ms.
+	LatencyCount uint64
+	LatencySum   int64
+	LatencyLast  int64 // latency của result gần nhất trong toàn bộ manager
+
+	// FirstResultMs: median của first-result latency từ tất cả stream đã đóng + active.
+	// Dùng LatencyFirstCount và LatencyFirstSum để tính avg.
+	LatencyFirstCount uint64
+	LatencyFirstSum   int64
+}
+
+// AvgLatencyMs trả về latency trung bình (ms); 0 nếu chưa có data.
+func (s ManagerStats) AvgLatencyMs() int64 {
+	if s.LatencyCount == 0 {
+		return 0
+	}
+	return s.LatencySum / int64(s.LatencyCount)
+}
+
+// AvgFirstResultMs trả về first-result latency trung bình (ms); 0 nếu chưa có data.
+func (s ManagerStats) AvgFirstResultMs() int64 {
+	if s.LatencyFirstCount == 0 {
+		return 0
+	}
+	return s.LatencyFirstSum / int64(s.LatencyFirstCount)
 }
 
 // Manager quản lý bidirectional gRPC stream tới AI service, một stream mỗi session.
@@ -58,24 +91,54 @@ type Manager struct {
 	totalSendErrors atomic.Uint64
 	totalRecvErrors atomic.Uint64
 	totalRetries    atomic.Uint64
+
+	totalLatencyCount      atomic.Uint64
+	totalLatencySum        atomic.Int64
+	totalLatencyLast       atomic.Int64
+	totalFirstResultCount  atomic.Uint64
+	totalFirstResultSum    atomic.Int64
 }
 
-// Stats trả về snapshot thống kê tích lũy: tổng lỗi và retries từ cả stream đang chạy và đã đóng.
+// Stats trả về snapshot thống kê tích lũy: tổng lỗi, retries và latency từ cả stream đang chạy và đã đóng.
 func (m *Manager) Stats() ManagerStats {
 	m.mu.RLock()
 	var activeSend, activeRecv uint64
 	var activeRetries int
+	var activeLatCount uint64
+	var activeLatSum, activeLatLast int64
+	var activeFirstCount uint64
+	var activeFirstSum int64
 	for _, s := range m.streams {
 		st := s.Stats()
 		activeSend += st.SendErrors
 		activeRecv += st.RecvErrors
 		activeRetries += st.Retries
+		activeLatCount += st.LatencyCount
+		activeLatSum += st.LatencySum
+		if st.LatencyLast > activeLatLast {
+			activeLatLast = st.LatencyLast
+		}
+		if st.FirstResultMs > 0 {
+			activeFirstCount++
+			activeFirstSum += st.FirstResultMs
+		}
 	}
 	m.mu.RUnlock()
+
+	latLast := m.totalLatencyLast.Load()
+	if activeLatLast > latLast {
+		latLast = activeLatLast
+	}
+
 	return ManagerStats{
-		TotalSendErrors: m.totalSendErrors.Load() + activeSend,
-		TotalRecvErrors: m.totalRecvErrors.Load() + activeRecv,
-		TotalRetries:    m.totalRetries.Load() + uint64(activeRetries),
+		TotalSendErrors:   m.totalSendErrors.Load() + activeSend,
+		TotalRecvErrors:   m.totalRecvErrors.Load() + activeRecv,
+		TotalRetries:      m.totalRetries.Load() + uint64(activeRetries),
+		LatencyCount:      m.totalLatencyCount.Load() + activeLatCount,
+		LatencySum:        m.totalLatencySum.Load() + activeLatSum,
+		LatencyLast:       latLast,
+		LatencyFirstCount: m.totalFirstResultCount.Load() + activeFirstCount,
+		LatencyFirstSum:   m.totalFirstResultSum.Load() + activeFirstSum,
 	}
 }
 
@@ -140,6 +203,15 @@ func (m *Manager) Open(
 		m.totalSendErrors.Add(st.SendErrors)
 		m.totalRecvErrors.Add(st.RecvErrors)
 		m.totalRetries.Add(uint64(st.Retries))
+		m.totalLatencyCount.Add(st.LatencyCount)
+		m.totalLatencySum.Add(st.LatencySum)
+		if st.LatencyLast > 0 {
+			m.totalLatencyLast.Store(st.LatencyLast)
+		}
+		if st.FirstResultMs > 0 {
+			m.totalFirstResultCount.Add(1)
+			m.totalFirstResultSum.Add(st.FirstResultMs)
+		}
 		m.mu.Lock()
 		if m.streams[sessionID] == s {
 			delete(m.streams, sessionID)

@@ -2,11 +2,14 @@ openapi: "3.0.3"
 
 info:
   title: Media AI Gateway
-  version: "1.0.0"
+  version: "2.0.0"
   description: |
     Realtime audio gateway — nhận RTP/WebRTC từ hạ tầng IMS/telecom, xử lý audio,
     gửi sang AI worker (STT/translate) qua gRPC streaming, trả kết quả về backend
     qua HTTP callback hoặc WebRTC DataChannel.
+
+    **DCSF integration (v2):** Gateway tích hợp DCAS — nhận sự kiện cuộc gọi từ DCSF
+    tại `/v1/vonras/call-sessions/{callId}/...` thay cho `/v1/sessions` (v1).
 
 servers:
   - url: http://localhost:8080
@@ -15,8 +18,8 @@ servers:
     description: Metrics server (Prometheus scrape target)
 
 tags:
-  - name: sessions
-    description: Quản lý session — tạo, truy vấn, xoá
+  - name: call-sessions
+    description: DCSF → DCAS — nhận sự kiện cuộc gọi từ DCSF, quản lý session audio
   - name: webrtc
     description: WebRTC signaling — offer/answer exchange
   - name: gateway
@@ -29,66 +32,87 @@ tags:
 # ─────────────────────────────────────────────────────────────────────────────
 paths:
 
-  # ── Sessions ──────────────────────────────────────────────────────────────
+  # ── Call Sessions (DCSF → DCAS) ──────────────────────────────────────────
 
-  /v1/sessions:
+  /v1/vonras/call-sessions/{callId}/notify-event:
     post:
-      tags: [sessions]
-      summary: Tạo session mới
+      tags: [call-sessions]
+      summary: Nhận sự kiện cuộc gọi từ DCSF
       description: |
-        Tạo một audio session. Với `source_type=raw_rtp`, gateway allocate một
-        UDP port riêng và trả về `rtp_ip` + `rtp_port` để caller gửi RTP vào.
-        Với `source_type=webrtc`, cần gọi tiếp `POST /v1/webrtc/offer`.
-      operationId: createSession
+        DCSF gọi endpoint này để thông báo sự kiện IMS call tới DCAS.
+
+        - **BEGIN** — DCAS ghi nhận cuộc gọi, trả `200 OK` (không tạo session).
+        - **ANSWER** — DCAS tạo session audio, cấp RTP port, trả `local_non_dc_media`
+          để DCSF dùng làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
+        - **Service chưa xử lý** (ví dụ `fun_calling`) — DCAS trả `200 OK`, không tạo session.
+      operationId: notifyEvent
+      parameters:
+        - $ref: "#/components/parameters/callId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateSessionRequest"
+              $ref: "#/components/schemas/SessionEvent"
             examples:
-              raw_rtp:
-                summary: Raw RTP session
+              begin:
+                summary: BEGIN event
                 value:
-                  id: "call-abc-001"
-                  source_type: "raw_rtp"
-                  codec: "PCMU"
-                  sample_rate: 8000
-                  ssrc: 12345
-                  remote_addr: "192.168.1.10:5100"
-                  callback_url: "http://backend/callback"
-              webrtc:
-                summary: WebRTC session
+                  callIdentifier: "p2uc31@[FC00:0DB8::]"
+                  event: "BEGIN"
+                  direction: "MT"
+                  role: "terminator"
+                  bearerCapability: "VIDEO"
+                  calling: "86156****5398"
+                  called: "86156****5399"
+              answer:
+                summary: ANSWER event — speech_to_text
                 value:
-                  id: "call-abc-002"
-                  source_type: "webrtc"
-                  codec: "opus"
-                  sample_rate: 48000
-                  channels: 2
-                  language: "vi"
-                  task: "transcribe"
+                  callIdentifier: "p2uc31@[FC00:0DB8::]"
+                  event: "ANSWER"
+                  selectedService: "speech_to_text"
+                  direction: "MT"
+                  role: "terminator"
+                  bearerCapability: "VIDEO"
+                  location:
+                    areaNumber: "0755"
+                    ncgi: "46070094F34050"
+                    tac: "000002"
+                  calling: "86156****5398"
+                  called: "86156****5399"
       responses:
+        "200":
+          description: |
+            BEGIN acknowledged — không tạo session. Cũng trả 200 cho service chưa xử lý.
+          content:
+            application/json:
+              schema:
+                type: object
         "201":
-          description: Session tạo thành công
+          description: ANSWER — session tạo thành công
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionResponse"
               example:
-                session_id: "call-abc-001"
+                session_id: "p2uc31@[FC00:0DB8::]"
                 status: "CREATED"
                 source_type: "raw_rtp"
                 codec: "PCMU"
                 sample_rate: 8000
                 channels: 1
-                created_at: "2026-06-18T08:00:00Z"
+                task: "speech_to_text"
+                created_at: "2026-06-27T08:00:00Z"
                 gateway_id: "gw-node-1"
                 rtp_ip: "192.168.100.10"
                 rtp_port: 40000
+                local_non_dc_media:
+                  sdpmLine: "audio 40000 RTP/AVP 0"
+                  sdpaLines: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
-          description: Session ID đã tồn tại
+          description: callId đã tồn tại (ANSWER đã được xử lý trước đó)
           content:
             application/json:
               schema:
@@ -96,13 +120,57 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
-  /v1/sessions/{id}:
-    get:
-      tags: [sessions]
-      summary: Lấy thông tin session
-      operationId: getSession
+  /v1/vonras/call-sessions/{callId}/ctrl-result:
+    post:
+      tags: [call-sessions]
+      summary: Nhận kết quả media negotiation từ DCSF
+      description: |
+        DCSF forward `ctrl_result` từ IMS-AS sau khi SDP negotiation hoàn tất.
+        Gateway cập nhật `remote_addr` (từ `tAccess.endpoint`) cho RTP routing
+        và optional `callbackUrl` cho ASR result delivery.
+
+        **DCSF extension:** `callbackUrl` không có trong 3GPP spec — được thêm để
+        gateway biết gửi ASR results đến đâu.
+      operationId: ctrlResult
       parameters:
-        - $ref: "#/components/parameters/sessionId"
+        - $ref: "#/components/parameters/callId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CtrlResultRequest"
+            example:
+              callIdentifier: "p2uc31@[FC00:0DB8::]"
+              mediaResources:
+                tCore:
+                  contextId: "ctx-core-001"
+                  terminationId: "term-core-001"
+                  endpoint: "10.1.1.1:5060"
+                tAccess:
+                  contextId: "ctx-access-001"
+                  terminationId: "term-access-001"
+                  endpoint: "192.168.1.10:5100"
+              callbackUrl: "http://mf-host:9090/asr-results"
+      responses:
+        "200":
+          description: Session cập nhật thành công
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/vonras/call-sessions/{callId}:
+    get:
+      tags: [call-sessions]
+      summary: Lấy thông tin session (debug)
+      operationId: getCallSession
+      parameters:
+        - $ref: "#/components/parameters/callId"
       responses:
         "200":
           description: Thông tin session
@@ -114,15 +182,17 @@ paths:
           $ref: "#/components/responses/NotFound"
 
     delete:
-      tags: [sessions]
-      summary: Đóng và xoá session
-      description: Giải phóng pipeline, RTP port, AI stream. Idempotent — 404 nếu không tồn tại.
-      operationId: deleteSession
+      tags: [call-sessions]
+      summary: Đóng session (RELEASE)
+      description: |
+        DCSF gọi khi nhận RELEASE event từ IMS-AS.
+        Giải phóng pipeline, RTP port, AI stream. Idempotent — 404 nếu không tồn tại.
+      operationId: deleteCallSession
       parameters:
-        - $ref: "#/components/parameters/sessionId"
+        - $ref: "#/components/parameters/callId"
       responses:
         "204":
-          description: Session đã được xoá
+          description: Session đã được đóng
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -134,13 +204,11 @@ paths:
       summary: WebRTC offer/answer exchange
       description: |
         Nhận SDP offer từ caller, tạo PeerConnection, trả SDP answer.
-        Session phải được tạo trước qua `POST /v1/sessions` với `source_type=webrtc`.
 
         **Luồng:**
-        1. `POST /v1/sessions` → nhận `session_id`
-        2. `POST /v1/webrtc/offer` với SDP offer → nhận SDP answer
-        3. ICE negotiation diễn ra giữa caller và gateway
-        4. Audio stream bắt đầu chạy qua pipeline
+        1. `POST /v1/webrtc/offer` với SDP offer → nhận SDP answer
+        2. ICE negotiation diễn ra giữa caller và gateway
+        3. Audio stream bắt đầu chạy qua pipeline
       operationId: webrtcOffer
       requestBody:
         required: true
@@ -340,14 +408,14 @@ paths:
 components:
 
   parameters:
-    sessionId:
-      name: id
+    callId:
+      name: callId
       in: path
       required: true
-      description: Session ID (phải khớp với `id` trong CreateSessionRequest)
+      description: Call session ID — callIdentifier từ DCSF (SIP URI hoặc hash)
       schema:
         type: string
-      example: "call-abc-001"
+      example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
 
   responses:
     BadRequest:
@@ -385,63 +453,120 @@ components:
 
   schemas:
 
+    # ── Shared ──────────────────────────────────────────────────────────────
+
+    MediaResource:
+      type: object
+      description: H.248/MEGACO media termination.
+      properties:
+        contextId:
+          type: string
+          description: H.248 context ID
+          example: "ctx-001"
+        terminationId:
+          type: string
+          description: H.248 termination ID
+          example: "term-access-001"
+        endpoint:
+          type: string
+          description: RTP endpoint "ip:port"
+          example: "192.168.1.10:5100"
+
+    MediaResources:
+      type: object
+      description: Cặp termination H.248 — core-side và access-side.
+      properties:
+        tCore:
+          $ref: "#/components/schemas/MediaResource"
+        tAccess:
+          $ref: "#/components/schemas/MediaResource"
+
+    EventLocation:
+      type: object
+      description: Vị trí địa lý của UE trong sự kiện DCSF.
+      properties:
+        areaNumber:
+          type: string
+          example: "0755"
+        ncgi:
+          type: string
+          example: "46070094F34050"
+        tac:
+          type: string
+          example: "000002"
+
     # ── Requests ────────────────────────────────────────────────────────────
 
-    CreateSessionRequest:
+    SessionEvent:
       type: object
-      required: [id, codec, sample_rate]
+      required: [callIdentifier, event]
+      description: Sự kiện phiên từ DCSF.
       properties:
-        id:
+        callIdentifier:
           type: string
-          description: Session ID duy nhất do caller cấp
-          example: "call-abc-001"
-        source_type:
+          description: SIP URI định danh cuộc gọi — dùng làm session ID
+          example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
+        event:
           type: string
-          enum: [raw_rtp, webrtc]
-          default: raw_rtp
-          description: Loại ingress
-        ssrc:
-          type: integer
-          format: int64
-          description: RTP SSRC. Dùng cho shared-port routing. 0 = fallback sang remote_addr
-          example: 12345
-        payload_type:
-          type: integer
-          format: int32
-          description: RTP payload type (0–127). 0 = tự suy từ codec
-        codec:
-          type: string
-          enum: [PCMU, PCMA, opus]
-          description: Audio codec
-          example: "PCMU"
-        sample_rate:
-          type: integer
-          description: Sample rate Hz
-          example: 8000
-        channels:
-          type: integer
-          default: 1
-          description: Số kênh audio
-          example: 1
-        language:
-          type: string
-          description: BCP-47 language tag gửi sang AI worker
-          example: "vi"
-        task:
-          type: string
-          description: AI task type (tuỳ AI worker định nghĩa)
-          example: "transcribe"
-        callback_url:
-          type: string
-          format: uri
-          description: HTTP endpoint nhận kết quả STT/translate
-          example: "http://backend.svc/api/asr/callback"
-        remote_addr:
+          enum: [BEGIN, ANSWER]
+          description: Loại sự kiện
+          example: "ANSWER"
+        selectedService:
           type: string
           description: |
-            UDP source address "ip:port" của caller.
-            Dùng làm fallback routing khi SSRC=0 trong shared ingress mode.
-          example: "192.168.1.10:5100"
+            Dịch vụ đã chọn từ DCSF. Gateway sẽ tạo session cho:
+            `speech_to_text`, `realtime_translation` → PCMU/8000.
+            Các service khác (ví dụ `fun_calling`) → ACK không tạo session.
+          example: "speech_to_text"
+        direction:
+          type: string
+          enum: [MO, MT]
+          example: "MT"
+        role:
+          type: string
+          enum: [originator, terminator]
+          example: "terminator"
+        bearerCapability:
+          type: string
+          enum: [AUDIO, VIDEO]
+          description: Loại bearer. Cả AUDIO và VIDEO đều dùng PCMU/8000 cho STT.
+          example: "VIDEO"
+        location:
+          $ref: "#/components/schemas/EventLocation"
+        calling:
+          type: string
+          description: MSISDN của bên gọi
+          example: "86156****5398"
+        called:
+          type: string
+          description: MSISDN của bên nhận
+          example: "86156****5399"
+
+    CtrlResultRequest:
+      type: object
+      required: [callIdentifier]
+      description: |
+        Ctrl result từ IMS-AS forwarded bởi DCSF sau SDP negotiation.
+        `callbackUrl` là DCSF extension — không có trong 3GPP spec.
+      properties:
+        callIdentifier:
+          type: string
+          description: SIP URI định danh cuộc gọi — phải khớp với session ID đã tạo
+          example: "p2uc31@[FC00:0DB8::]"
+        actionResults:
+          type: array
+          description: Kết quả xử lý từ IMS-AS. Gateway không xử lý, chỉ forward-compatible.
+          items:
+            type: object
+        mediaResources:
+          $ref: "#/components/schemas/MediaResources"
+        callbackUrl:
+          type: string
+          format: uri
+          description: |
+            HTTP/2 endpoint nhận ASR results (DCSF extension).
+            `tAccess.endpoint` tự động được set làm `remote_addr` cho RTP routing.
+          example: "http://mf-host:9090/asr-results"
 
     OfferRequest:
       type: object
@@ -449,7 +574,7 @@ components:
       properties:
         session_id:
           type: string
-          description: Session ID đã tạo qua POST /v1/sessions
+          description: Session ID
           example: "call-abc-002"
         sdp:
           type: string
@@ -521,7 +646,8 @@ components:
       properties:
         session_id:
           type: string
-          example: "call-abc-001"
+          description: Session ID (= callId = callIdentifier từ DCSF)
+          example: "p2uc31@[FC00:0DB8::]"
         status:
           type: string
           enum: [CREATED, ACTIVE, CLOSED, ERROR]
@@ -544,23 +670,45 @@ components:
           example: "vi"
         task:
           type: string
-          example: "transcribe"
+          description: selectedService từ DCSF (ví dụ speech_to_text, realtime_translation)
+          example: "speech_to_text"
         created_at:
           type: string
           format: date-time
-          example: "2026-06-18T08:00:00Z"
+          example: "2026-06-27T08:00:00Z"
         gateway_id:
           type: string
-          description: Node identity (chỉ có trong CREATE response)
+          description: Node identity (chỉ có trong ANSWER CREATE response)
           example: "gw-node-1"
         rtp_ip:
           type: string
-          description: Public IP để gửi RTP vào (chỉ có trong CREATE response, raw_rtp)
+          description: Public IP để gửi RTP vào (chỉ có trong ANSWER CREATE response)
           example: "192.168.100.10"
         rtp_port:
           type: integer
-          description: UDP port để gửi RTP vào (chỉ có trong CREATE response, raw_rtp)
+          description: UDP port để gửi RTP vào (chỉ có trong ANSWER CREATE response)
           example: 40000
+        local_non_dc_media:
+          $ref: "#/components/schemas/NonDcMedia"
+          description: |
+            SDP mô tả gateway RTP endpoint (chỉ có trong ANSWER CREATE response, raw_rtp với per-session port pool).
+            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts (3GPP TS29.176).
+
+    NonDcMedia:
+      type: object
+      description: SDP mô tả RTP endpoint theo định dạng 3GPP MRM (TS29.176).
+      required: [sdpmLine, sdpaLines]
+      properties:
+        sdpmLine:
+          type: string
+          description: Nội dung sau "m=" trong SDP m-line (không gồm "m=")
+          example: "audio 40000 RTP/AVP 0"
+        sdpaLines:
+          type: array
+          items:
+            type: string
+          description: Danh sách nội dung sau "a=" của các SDP a-line (không gồm "a=")
+          example: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
 
     AnswerResponse:
       type: object

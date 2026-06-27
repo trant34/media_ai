@@ -110,31 +110,52 @@ func assertContentType(t *testing.T, w *httptest.ResponseRecorder) {
 	}
 }
 
-func validCreateReq() CreateSessionRequest {
-	return CreateSessionRequest{
-		ID:         "sess-1",
-		SourceType: "raw_rtp",
-		Codec:      "PCMU",
-		SampleRate: 8000,
-		Channels:   1,
+// validAnswerReq trả SessionEvent cho ANSWER event với speech_to_text service.
+// callId mặc định "call-sess-1" (khớp với notifyPath/sessionPath bên dưới).
+func validAnswerReq() SessionEvent {
+	return SessionEvent{
+		CallIdentifier:  "call-sess-1",
+		Event:           "ANSWER",
+		SelectedService: "speech_to_text",
 	}
 }
 
-// ---------- POST /v1/sessions ----------
+const testCallID = "call-sess-1"
 
-func TestCreateSession_Created(t *testing.T) {
+func notifyPath(callId string) string {
+	return "/v1/vonras/call-sessions/" + callId + "/notify-event"
+}
+
+func ctrlResultPath(callId string) string {
+	return "/v1/vonras/call-sessions/" + callId + "/ctrl-result"
+}
+
+func sessionPath(callId string) string {
+	return "/v1/vonras/call-sessions/" + callId
+}
+
+// ---------- POST notify-event ----------
+
+func TestNotifyEvent_Begin_OK(t *testing.T) {
+	s := newTestServer(t, &fakeStarter{})
+	req := SessionEvent{CallIdentifier: testCallID, Event: "BEGIN"}
+	w := postJSON(t, s, notifyPath(testCallID), req)
+	assertStatus(t, w, http.StatusOK)
+}
+
+func TestNotifyEvent_Answer_Created(t *testing.T) {
 	coord := &fakeStarter{}
 	s := newTestServer(t, coord)
 
-	w := postJSON(t, s, "/v1/sessions", validCreateReq())
+	w := postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
 	assertStatus(t, w, http.StatusCreated)
 	assertContentType(t, w)
 
 	var resp SessionResponse
 	decodeJSON(t, w, &resp)
-	if resp.SessionID != "sess-1" {
-		t.Errorf("session_id: want sess-1, got %s", resp.SessionID)
+	if resp.SessionID != testCallID {
+		t.Errorf("session_id: want %s, got %s", testCallID, resp.SessionID)
 	}
 	if resp.Codec != "PCMU" {
 		t.Errorf("codec: want PCMU, got %s", resp.Codec)
@@ -142,85 +163,66 @@ func TestCreateSession_Created(t *testing.T) {
 	if resp.SampleRate != 8000 {
 		t.Errorf("sample_rate: want 8000, got %d", resp.SampleRate)
 	}
+	if resp.Channels != 1 {
+		t.Errorf("channels: want 1, got %d", resp.Channels)
+	}
 	if resp.Status == "" {
 		t.Error("status should not be empty")
 	}
-	if coord.started[0] != "sess-1" {
-		t.Errorf("coordinator not called with sess-1")
+	if resp.Task != "speech_to_text" {
+		t.Errorf("task: want speech_to_text, got %s", resp.Task)
+	}
+	if len(coord.started) == 0 || coord.started[0] != testCallID {
+		t.Errorf("coordinator not called with %s", testCallID)
 	}
 }
 
-func TestCreateSession_DefaultChannels(t *testing.T) {
+func TestNotifyEvent_Answer_UnknownService(t *testing.T) {
+	// Services not yet handled (e.g. fun_calling) should return 200 OK without creating a session.
 	coord := &fakeStarter{}
 	s := newTestServer(t, coord)
 
-	req := validCreateReq()
-	req.Channels = 0
-	w := postJSON(t, s, "/v1/sessions", req)
-	assertStatus(t, w, http.StatusCreated)
-
-	var resp SessionResponse
-	decodeJSON(t, w, &resp)
-	if resp.Channels != 1 {
-		t.Errorf("channels: want 1 (default), got %d", resp.Channels)
+	req := SessionEvent{
+		CallIdentifier:  testCallID,
+		Event:           "ANSWER",
+		SelectedService: "fun_calling",
 	}
+	w := postJSON(t, s, notifyPath(testCallID), req)
+	assertStatus(t, w, http.StatusOK)
+
+	// No session should have been created.
+	wg := getPath(t, s, sessionPath(testCallID))
+	assertStatus(t, wg, http.StatusNotFound)
 }
 
-func TestCreateSession_MissingID(t *testing.T) {
+func TestNotifyEvent_Answer_InvalidJSON(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	req := validCreateReq()
-	req.ID = ""
-	w := postJSON(t, s, "/v1/sessions", req)
-	assertStatus(t, w, http.StatusBadRequest)
-	var e ErrorResponse
-	decodeJSON(t, w, &e)
-	if !strings.Contains(e.Error, "id") {
-		t.Errorf("error should mention id, got: %s", e.Error)
-	}
-}
-
-func TestCreateSession_MissingCodec(t *testing.T) {
-	s := newTestServer(t, &fakeStarter{})
-	req := validCreateReq()
-	req.Codec = ""
-	w := postJSON(t, s, "/v1/sessions", req)
-	assertStatus(t, w, http.StatusBadRequest)
-}
-
-func TestCreateSession_MissingSampleRate(t *testing.T) {
-	s := newTestServer(t, &fakeStarter{})
-	req := validCreateReq()
-	req.SampleRate = 0
-	w := postJSON(t, s, "/v1/sessions", req)
-	assertStatus(t, w, http.StatusBadRequest)
-}
-
-func TestCreateSession_InvalidJSON(t *testing.T) {
-	s := newTestServer(t, &fakeStarter{})
-	r := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader("{bad json"))
+	r := httptest.NewRequest(http.MethodPost, notifyPath(testCallID), strings.NewReader("{bad json"))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.routes().ServeHTTP(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
-func TestCreateSession_DuplicateID(t *testing.T) {
+func TestNotifyEvent_Answer_DuplicateID(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	postJSON(t, s, "/v1/sessions", validCreateReq())
-	w := postJSON(t, s, "/v1/sessions", validCreateReq())
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
+	w := postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 	assertStatus(t, w, http.StatusConflict)
 }
 
-func TestCreateSession_CoordFail_RollsBack(t *testing.T) {
+func TestNotifyEvent_Answer_CoordFail_RollsBack(t *testing.T) {
 	coord := &fakeStarter{err: fmt.Errorf("pipeline broke")}
 	s := newTestServer(t, coord)
-	w := postJSON(t, s, "/v1/sessions", validCreateReq())
+
+	w := postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 	assertStatus(t, w, http.StatusBadRequest)
 
-	wg := getPath(t, s, "/v1/sessions/sess-1")
+	wg := getPath(t, s, sessionPath(testCallID))
 	assertStatus(t, wg, http.StatusNotFound)
 }
 
-func TestCreateSession_MaxSessions(t *testing.T) {
+func TestNotifyEvent_Answer_MaxSessions(t *testing.T) {
 	mgr := session.NewManager(session.ManagerConfig{
 		MaxSessions:     1,
 		PacketQueueSize: 8,
@@ -234,62 +236,96 @@ func TestCreateSession_MaxSessions(t *testing.T) {
 	disp := result.NewDispatcher(result.DefaultConfig())
 	s := NewServer(DefaultServerConfig(), mgr, &fakeStarter{}, pool, aiMgr, disp)
 
-	postJSON(t, s, "/v1/sessions", validCreateReq())
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
-	req2 := validCreateReq()
-	req2.ID = "sess-2"
-	w := postJSON(t, s, "/v1/sessions", req2)
+	req2 := SessionEvent{
+		CallIdentifier:  "call-sess-2",
+		Event:           "ANSWER",
+		SelectedService: "speech_to_text",
+	}
+	w := postJSON(t, s, notifyPath("call-sess-2"), req2)
 	assertStatus(t, w, http.StatusServiceUnavailable)
 }
 
-// ---------- GET /v1/sessions/{id} ----------
-
-func TestGetSession_Found(t *testing.T) {
+func TestNotifyEvent_UnknownEvent(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	postJSON(t, s, "/v1/sessions", validCreateReq())
+	req := SessionEvent{CallIdentifier: testCallID, Event: "RELEASE"}
+	w := postJSON(t, s, notifyPath(testCallID), req)
+	assertStatus(t, w, http.StatusBadRequest)
+}
 
-	w := getPath(t, s, "/v1/sessions/sess-1")
+// ---------- GET /v1/vonras/call-sessions/{callId} ----------
+
+func TestGetCallSession_Found(t *testing.T) {
+	s := newTestServer(t, &fakeStarter{})
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
+
+	w := getPath(t, s, sessionPath(testCallID))
 	assertStatus(t, w, http.StatusOK)
 	assertContentType(t, w)
 
 	var resp SessionResponse
 	decodeJSON(t, w, &resp)
-	if resp.SessionID != "sess-1" {
-		t.Errorf("session_id: want sess-1, got %s", resp.SessionID)
+	if resp.SessionID != testCallID {
+		t.Errorf("session_id: want %s, got %s", testCallID, resp.SessionID)
 	}
 	if resp.Codec != "PCMU" {
 		t.Errorf("codec mismatch")
 	}
 }
 
-func TestGetSession_NotFound(t *testing.T) {
+func TestGetCallSession_NotFound(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	w := getPath(t, s, "/v1/sessions/nope")
+	w := getPath(t, s, sessionPath("nope"))
 	assertStatus(t, w, http.StatusNotFound)
 }
 
-// ---------- DELETE /v1/sessions/{id} ----------
+// ---------- DELETE /v1/vonras/call-sessions/{callId} ----------
 
-func TestDeleteSession_NoContent(t *testing.T) {
+func TestDeleteCallSession_NoContent(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	postJSON(t, s, "/v1/sessions", validCreateReq())
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
-	w := deletePath(t, s, "/v1/sessions/sess-1")
+	w := deletePath(t, s, sessionPath(testCallID))
 	assertStatus(t, w, http.StatusNoContent)
 }
 
-func TestDeleteSession_NotFound(t *testing.T) {
+func TestDeleteCallSession_NotFound(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	w := deletePath(t, s, "/v1/sessions/nope")
+	w := deletePath(t, s, sessionPath("nope"))
 	assertStatus(t, w, http.StatusNotFound)
 }
 
-func TestDeleteSession_GoneAfterDelete(t *testing.T) {
+func TestDeleteCallSession_GoneAfterDelete(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	postJSON(t, s, "/v1/sessions", validCreateReq())
-	deletePath(t, s, "/v1/sessions/sess-1")
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
+	deletePath(t, s, sessionPath(testCallID))
 
-	w := getPath(t, s, "/v1/sessions/sess-1")
+	w := getPath(t, s, sessionPath(testCallID))
+	assertStatus(t, w, http.StatusNotFound)
+}
+
+// ---------- POST /v1/vonras/call-sessions/{callId}/ctrl-result ----------
+
+func TestCtrlResult_OK(t *testing.T) {
+	s := newTestServer(t, &fakeStarter{})
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
+
+	req := CtrlResultRequest{
+		CallIdentifier: testCallID,
+		MediaResources: &MediaResources{
+			TAccess: MediaResource{Endpoint: "10.0.0.1:20000"},
+		},
+	}
+	w := postJSON(t, s, ctrlResultPath(testCallID), req)
+	assertStatus(t, w, http.StatusOK)
+	assertContentType(t, w)
+}
+
+func TestCtrlResult_NotFound(t *testing.T) {
+	s := newTestServer(t, &fakeStarter{})
+	req := CtrlResultRequest{CallIdentifier: "nope"}
+	w := postJSON(t, s, ctrlResultPath("nope"), req)
 	assertStatus(t, w, http.StatusNotFound)
 }
 
@@ -308,7 +344,6 @@ func TestHealthReady_OK(t *testing.T) {
 }
 
 func TestHealthReady_NotReady_HasReason(t *testing.T) {
-	// Force rejection via memory threshold = 1 byte.
 	s := newTestServer(t, &fakeStarter{})
 	s.SetMemThreshold(1)
 
@@ -360,7 +395,7 @@ func TestHealth_OK(t *testing.T) {
 
 func TestStats_OK(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	postJSON(t, s, "/v1/sessions", validCreateReq())
+	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
 	w := getPath(t, s, "/v1/stats")
 	assertStatus(t, w, http.StatusOK)
@@ -383,7 +418,6 @@ func TestMetrics_ContainsRequiredMetrics(t *testing.T) {
 	body := w.Body.String()
 
 	required := []string{
-		// existing
 		"media_ai_sessions_active",
 		"media_ai_sessions_max",
 		"media_ai_ai_streams_active",
@@ -399,7 +433,6 @@ func TestMetrics_ContainsRequiredMetrics(t *testing.T) {
 		"media_ai_dispatcher_send_errors_total",
 		"media_ai_gateway_nodes_registered",
 		"media_ai_scrape_timestamp_ms",
-		// new §5.25
 		"media_ai_ai_send_errors_total",
 		"media_ai_ai_recv_errors_total",
 		"media_ai_ai_reconnects_total",
@@ -427,7 +460,7 @@ func TestMetrics_ContentType(t *testing.T) {
 }
 
 func TestMetrics_PoolQueueCapReflectsConfig(t *testing.T) {
-	s := newTestServer(t, &fakeStarter{}) // QueueSize=8 in newTestServer
+	s := newTestServer(t, &fakeStarter{})
 	w := getPath(t, s, "/metrics")
 	body := w.Body.String()
 	if !strings.Contains(body, "media_ai_pool_queue_cap 8") {
@@ -497,8 +530,8 @@ func TestH2C_FullSessionLifecycle(t *testing.T) {
 	client := &http.Client{Transport: h2cTransport}
 	base := "http://" + addr
 
-	body, _ := json.Marshal(validCreateReq())
-	resp, err := client.Post(base+"/v1/sessions", "application/json", bytes.NewReader(body))
+	body, _ := json.Marshal(validAnswerReq())
+	resp, err := client.Post(base+notifyPath(testCallID), "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -511,7 +544,7 @@ func TestH2C_FullSessionLifecycle(t *testing.T) {
 		t.Errorf("POST proto: want HTTP/2.0, got %s", resp.Proto)
 	}
 
-	resp, err = client.Get(base + "/v1/sessions/sess-1")
+	resp, err = client.Get(base + sessionPath(testCallID))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -521,7 +554,7 @@ func TestH2C_FullSessionLifecycle(t *testing.T) {
 		t.Fatalf("GET status: want 200, got %d", resp.StatusCode)
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, base+"/v1/sessions/sess-1", nil)
+	req, _ := http.NewRequest(http.MethodDelete, base+sessionPath(testCallID), nil)
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("DELETE: %v", err)

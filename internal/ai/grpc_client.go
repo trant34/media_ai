@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,8 +39,17 @@ type Stream struct {
 	err     error
 	retries int
 
-	sendErrors atomic.Uint64
-	recvErrors atomic.Uint64
+	sendErrors      atomic.Uint64
+	recvErrors      atomic.Uint64
+	endOfStreamSent atomic.Bool
+
+	// Latency tracking (end_ms-to-recv, ms).
+	latencyCount atomic.Uint64 // số result có end_ms hợp lệ
+	latencySum   atomic.Int64  // tổng latency (ms)
+	latencyLast  atomic.Int64  // latency của result gần nhất (ms)
+
+	// First-result latency: ms từ lúc stream mở đến khi nhận result đầu tiên.
+	firstResultMs atomic.Int64 // 0 = chưa nhận result nào
 }
 
 // StreamStats là snapshot counter của một Stream.
@@ -47,6 +57,14 @@ type StreamStats struct {
 	SendErrors uint64
 	RecvErrors uint64
 	Retries    int
+
+	// Latency stats (end_ms-to-recv, ms). Count=0 nếu AI không set end_ms.
+	LatencyCount uint64
+	LatencySum   int64
+	LatencyLast  int64
+
+	// FirstResultMs: ms từ stream open đến result đầu tiên; 0 nếu chưa có result.
+	FirstResultMs int64
 }
 
 // Stats trả về snapshot thống kê của stream tại thời điểm gọi.
@@ -55,9 +73,13 @@ func (s *Stream) Stats() StreamStats {
 	retries := s.retries
 	s.mu.Unlock()
 	return StreamStats{
-		SendErrors: s.sendErrors.Load(),
-		RecvErrors: s.recvErrors.Load(),
-		Retries:    retries,
+		SendErrors:    s.sendErrors.Load(),
+		RecvErrors:    s.recvErrors.Load(),
+		Retries:       retries,
+		LatencyCount:  s.latencyCount.Load(),
+		LatencySum:    s.latencySum.Load(),
+		LatencyLast:   s.latencyLast.Load(),
+		FirstResultMs: s.firstResultMs.Load(),
 	}
 }
 
@@ -128,7 +150,10 @@ func (s *Stream) runWithReconnect(
 			return
 		}
 		s.retries++
+		attempt := s.retries
 		s.mu.Unlock()
+
+		slog.Debug("ai: reconnecting", "session_id", sessionID, "attempt", attempt, "backoff", backoff, "error", pairErr)
 
 		s.clearErr()
 
@@ -160,6 +185,8 @@ func (s *Stream) runPair(
 	audioIn <-chan pipeline.AudioChunk,
 	resultOut chan<- pipeline.RecognitionResult,
 ) {
+	s.endOfStreamSent.Store(false)
+
 	pairCtx, pairCancel := context.WithCancel(ctx)
 	defer pairCancel()
 
@@ -236,14 +263,26 @@ func (s *Stream) sendWithTimeout(ctx context.Context, client StreamClient, chunk
 }
 
 func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-chan pipeline.AudioChunk) {
+	var firstChunkTimer <-chan time.Time
+	if s.cfg.FirstChunkTimeout > 0 {
+		t := time.NewTimer(s.cfg.FirstChunkTimeout)
+		defer t.Stop()
+		firstChunkTimer = t.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-firstChunkTimer:
+			s.setErr(ErrFirstChunkTimeout)
+			slog.Debug("ai: first chunk timeout", "session_id", s.SessionID, "stream_id", s.StreamID, "timeout", s.cfg.FirstChunkTimeout)
 			return
 		case chunk, ok := <-audioIn:
 			if !ok {
 				return
 			}
+			firstChunkTimer = nil // disable after first chunk received
 			if err := s.sendWithTimeout(ctx, client, chunk); err != nil {
 				if !isCtxErr(err) {
 					s.sendErrors.Add(1)
@@ -251,7 +290,35 @@ func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-cha
 				}
 				return
 			}
+			if chunk.EndOfStream {
+				s.endOfStreamSent.Store(true)
+			}
 		}
+	}
+}
+
+// recvWithTimeout wraps client.Recv với idle timeout nếu cfg.RecvIdleTimeout > 0.
+// Trả về ErrRecvIdleTimeout nếu không có result nào trong khoảng RecvIdleTimeout.
+func (s *Stream) recvWithTimeout(ctx context.Context, client StreamClient) (pipeline.RecognitionResult, error) {
+	if s.cfg.RecvIdleTimeout == 0 {
+		return client.Recv()
+	}
+	type result struct {
+		r   pipeline.RecognitionResult
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		r, err := client.Recv()
+		ch <- result{r, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.r, res.err
+	case <-time.After(s.cfg.RecvIdleTimeout):
+		return pipeline.RecognitionResult{}, ErrRecvIdleTimeout
+	case <-ctx.Done():
+		return pipeline.RecognitionResult{}, ctx.Err()
 	}
 }
 
@@ -262,14 +329,42 @@ func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-cha
 //   - Final result (IsFinal=true) block cho đến khi được deliver (hoặc ctx done).
 func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut chan<- pipeline.RecognitionResult) {
 	for {
-		r, err := client.Recv()
+		r, err := s.recvWithTimeout(ctx, client)
 		if err != nil {
-			if err != io.EOF {
-				s.recvErrors.Add(1)
-				s.setErr(err)
+			if ctx.Err() == nil {
+				if err != io.EOF {
+					s.recvErrors.Add(1)
+					s.setErr(err)
+					slog.Debug("ai: recv error from worker", "session_id", s.SessionID, "stream_id", s.StreamID, "error", err)
+				} else if !s.endOfStreamSent.Load() {
+					s.recvErrors.Add(1)
+					s.setErr(ErrUnexpectedEOF)
+					slog.Debug("ai: unexpected EOF from worker", "session_id", s.SessionID, "stream_id", s.StreamID)
+				}
 			}
 			return
 		}
+
+		now := time.Now().UnixMilli()
+
+		// First-result latency (stream open → first result).
+		if s.firstResultMs.CompareAndSwap(0, now-s.OpenedAt.UnixMilli()) {
+			slog.Debug("ai: first result received",
+				"session_id", s.SessionID,
+				"first_result_ms", now-s.OpenedAt.UnixMilli(),
+			)
+		}
+
+		// End-to-result latency (audio end → result received).
+		if r.EndMs > 0 {
+			lat := now - r.EndMs
+			if lat >= 0 {
+				s.latencyCount.Add(1)
+				s.latencySum.Add(lat)
+				s.latencyLast.Store(lat)
+			}
+		}
+
 		select {
 		case resultOut <- r:
 			continue

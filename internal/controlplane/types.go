@@ -1,27 +1,65 @@
 package controlplane
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
-// CreateSessionRequest là JSON body cho POST /v1/sessions.
-type CreateSessionRequest struct {
-	ID          string `json:"id"`
-	SourceType  string `json:"source_type"`        // "raw_rtp" | "webrtc"
-	SSRC        uint32 `json:"ssrc,omitempty"`
-	PayloadType uint8  `json:"payload_type,omitempty"`
-	Codec       string `json:"codec"`              // "PCMU" | "PCMA" | "opus"
-	SampleRate  int    `json:"sample_rate"`
-	Channels    int    `json:"channels,omitempty"` // default 1
-	Language    string `json:"language,omitempty"`
-	Task        string `json:"task,omitempty"`
-	CallbackURL string `json:"callback_url,omitempty"`
-	// RemoteAddr là địa chỉ UDP nguồn "ip:port" của caller.
-	// Dùng làm fallback routing khi SSRC=0 trong shared ingress mode.
-	RemoteAddr  string `json:"remote_addr,omitempty"`
+// MediaResource identifies an H.248/MEGACO media termination.
+type MediaResource struct {
+	ContextID     string `json:"contextId"`
+	TerminationID string `json:"terminationId"`
+	Endpoint      string `json:"endpoint"`
+}
+
+// MediaResources holds the H.248 terminations provided by DCAS after SDP negotiation.
+type MediaResources struct {
+	TCore   MediaResource `json:"tCore"`
+	TAccess MediaResource `json:"tAccess"`
+}
+
+// SessionEvent là JSON body cho POST /v1/vonras/call-sessions/{callId}/notify-event.
+// Body gửi thẳng các field — không bọc trong wrapper.
+// SessionEvent mô tả sự kiện phiên từ DCSF.
+type SessionEvent struct {
+	CallIdentifier   string         `json:"callIdentifier"`
+	Event            string         `json:"event"`                      // "BEGIN" | "ANSWER"
+	SelectedService  string         `json:"selectedService,omitempty"`
+	Direction        string         `json:"direction,omitempty"`
+	Role             string         `json:"role,omitempty"`
+	BearerCapability string         `json:"bearerCapability,omitempty"` // "AUDIO" | "VIDEO"
+	Location         *EventLocation `json:"location,omitempty"`
+	Calling          string         `json:"calling,omitempty"`
+	Called           string         `json:"called,omitempty"`
+}
+
+// EventLocation mô tả vị trí địa lý của UE trong sự kiện DCSF.
+type EventLocation struct {
+	AreaNumber string `json:"areaNumber,omitempty"`
+	NCGI       string `json:"ncgi,omitempty"`
+	TAC        string `json:"tac,omitempty"`
+}
+
+// CtrlResultRequest là JSON body cho POST /v1/vonras/call-sessions/{callId}/ctrl-result.
+// callbackUrl là DCSF extension — không có trong 3GPP spec, dùng để set ASR callback sau SDP negotiation.
+type CtrlResultRequest struct {
+	CallIdentifier string          `json:"callIdentifier"`
+	ActionResults  json.RawMessage `json:"actionResults,omitempty"` // forward-compatible, không parse
+	MediaResources *MediaResources `json:"mediaResources,omitempty"`
+	CallbackURL    string          `json:"callbackUrl,omitempty"`
+}
+
+// NonDcMedia mô tả RTP endpoint theo định dạng SDP (dùng cho 3GPP MRM API).
+// sdpmLine là nội dung sau "m=" trong SDP m-line.
+// sdpaLines là danh sách nội dung sau "a=" của các a-line liên quan.
+type NonDcMedia struct {
+	SDPMLine  string   `json:"sdpmLine"`
+	SDPALines []string `json:"sdpaLines"`
 }
 
 // SessionResponse là JSON response cho session endpoints.
-// POST /v1/sessions populates GatewayID, RTPIP, RTPPort when applicable;
-// GET /v1/sessions/{id} omits those fields.
+// POST .../notify-event (ANSWER) populates GatewayID, RTPIP, RTPPort, LocalNonDcMedia when applicable;
+// GET .../call-sessions/{callId} omits those fields.
 type SessionResponse struct {
 	SessionID  string    `json:"session_id"`
 	Status     string    `json:"status"`
@@ -33,10 +71,11 @@ type SessionResponse struct {
 	Task       string    `json:"task,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 
-	// Populated on CREATE for raw_rtp sessions.
-	GatewayID string `json:"gateway_id,omitempty"`
-	RTPIP     string `json:"rtp_ip,omitempty"`
-	RTPPort   int    `json:"rtp_port,omitempty"`
+	// Populated on CREATE for raw_rtp sessions with per-session port pool.
+	GatewayID       string      `json:"gateway_id,omitempty"`
+	RTPIP           string      `json:"rtp_ip,omitempty"`
+	RTPPort         int         `json:"rtp_port,omitempty"`
+	LocalNonDcMedia *NonDcMedia `json:"local_non_dc_media,omitempty"`
 }
 
 // StatsResponse là JSON response cho GET /v1/stats.
@@ -80,4 +119,46 @@ type DispatcherStats struct {
 type ErrorResponse struct {
 	Error        string `json:"error"`
 	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`
+}
+
+// ConnectionsResponse là JSON response cho GET /v1/connections.
+type ConnectionsResponse struct {
+	AIWorkers []AIWorkerConn `json:"ai_workers"`
+	Callback  CallbackConn   `json:"callback"`
+	RTP       RTPConnSummary `json:"rtp"`
+}
+
+// AIWorkerConn mô tả trạng thái kết nối gRPC tới một AI worker.
+type AIWorkerConn struct {
+	Addr         string         `json:"addr"`
+	State        string         `json:"state"`          // IDLE | CONNECTING | READY | TRANSIENT_FAILURE | SHUTDOWN
+	ActiveStream int            `json:"active_streams"` // số gRPC stream đang mở
+	Latency      AILatencyStats `json:"latency"`
+}
+
+// AILatencyStats là thống kê latency của AI worker.
+type AILatencyStats struct {
+	// End-to-result: thời gian từ cuối audio (end_ms) đến khi nhận kết quả.
+	// Count=0 nếu AI worker không set end_ms trong RecognitionResult.
+	LastMs int64  `json:"last_ms"` // latency của result gần nhất (ms)
+	AvgMs  int64  `json:"avg_ms"`  // latency trung bình (ms)
+	Count  uint64 `json:"count"`   // số result đã đo được
+
+	// First-result: thời gian từ khi stream mở đến khi nhận result đầu tiên.
+	AvgFirstResultMs int64 `json:"avg_first_result_ms"` // trung bình qua các stream đã hoàn thành
+}
+
+// CallbackConn mô tả trạng thái HTTP/2 connection tới callback server.
+type CallbackConn struct {
+	URL          string `json:"url"`
+	Connected    bool   `json:"connected"`
+	Error        string `json:"error,omitempty"`
+	PreconnectAt string `json:"preconnect_at,omitempty"` // RFC3339
+}
+
+// RTPConnSummary tóm tắt số lượng kết nối RTP.
+type RTPConnSummary struct {
+	PerSessionOpen     int  `json:"per_session_open"`     // số port đang cấp phát (= session đang dùng per-session port)
+	PerSessionCapacity int  `json:"per_session_capacity"` // tổng số port trong pool; 0 nếu pool không cấu hình
+	SharedIngress      bool `json:"shared_ingress"`       // true nếu shared UDP ingress đang chạy
 }

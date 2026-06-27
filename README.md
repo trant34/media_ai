@@ -65,12 +65,14 @@ yum install python3 ffmpeg   # ffmpeg từ RPM Fusion
 | Binary | Dùng cho |
 |--------|----------|
 | `cmd/mock-ai-worker` | Fake AI gRPC server — partial mỗi 3 chunks, final mỗi 6 chunks |
-| `cmd/mock-callback-server` | H2C callback receiver cho `test-rtp-callback.sh` |
+| `cmd/mock-callback-server` | H2C callback receiver — log mỗi callback, thoát sau N final |
+| `cmd/mock-rtp-sender` | Gửi RTP packet từ file PCM/AMR/G.711 vào gateway (dùng trong test script) |
 
 ```bash
-# Build cả hai (pure Go, không cần CGO hay library ngoài)
+# Build tất cả (pure Go, không cần CGO hay library ngoài)
 go build -o bin/mock-ai-worker       ./cmd/mock-ai-worker
 go build -o bin/mock-callback-server ./cmd/mock-callback-server
+go build -o bin/mock-rtp-sender      ./cmd/mock-rtp-sender
 
 # Usage: mock-callback-server
 ./bin/mock-callback-server --port 9999 --expect-final 1 --timeout 30s
@@ -83,6 +85,20 @@ go build -o bin/mock-callback-server ./cmd/mock-callback-server
 | `--timeout` | `30s` | Timeout khi `expect-final > 0` |
 
 Output: mỗi dòng là một JSON — `{"event":"ready"}`, `{"event":"callback",...}`, `{"event":"summary",...}`.
+
+## Config profiles
+
+| File | Dùng cho |
+|------|----------|
+| `config/gateway.yaml` | Reference config — tất cả field có comment giải thích, giá trị default production |
+| `config/gateway-mock.yaml` | Lab test — `mock-ai-worker` localhost, PCM dump, callback timeout rộng |
+| `config/gateway-ims.yaml` | IMS/Telecom — AMR-WB, SBC per-session port pool, jitter rộng hơn |
+| `config/gateway-ha.yaml` | High Availability — multi-node cluster, port range tách biệt per node |
+
+```bash
+./bin/media-ai-gateway --config config/gateway-ims.yaml
+./bin/media-ai-gateway --config config/gateway-ha.yaml
+```
 
 ## Deploy
 
@@ -104,7 +120,10 @@ kubectl apply -f deploy/k8s/service.yaml
 
 | File | Mô tả |
 |------|-------|
-| [docs/openapi.yaml](docs/openapi.yaml) | OpenAPI 3.0.3 spec — tất cả REST endpoints, schemas, examples |
+| [docs/openapi.yaml](docs/openapi.yaml) | OpenAPI 3.0.3 spec — tất cả REST endpoints của gateway (sessions, WebRTC, health, metrics) |
+| [docs/openapi-callback.yaml](docs/openapi-callback.yaml) | OpenAPI 3.0.3 spec — Callback Receiver API mà **MF** phải implement để nhận ASR kết quả |
+| [docs/callback.md](docs/callback.md) | Callback message reference — HTTP/2 POST format, JSON schema, retry policy, drop policy, implement guide |
+| [docs/metrics.md](docs/metrics.md) | Prometheus metrics reference — 37 metric, ý nghĩa, alert threshold, drop rate |
 | [docs/media-ai-gateway-design-modules_v2.md](docs/media-ai-gateway-design-modules_v2.md) | Thiết kế kiến trúc hiện hành — module breakdown, luồng dữ liệu, API, config đầy đủ |
 | [docs/media-ai-gateway-design-modules_v1.md](docs/media-ai-gateway-design-modules_v1.md) | Phiên bản thiết kế ban đầu (tham khảo) |
 | [docs/pion-webrtc-analysis.md](docs/pion-webrtc-analysis.md) | Phân tích pion/webrtc v4 — lựa chọn API, ICE/DTLS/SRTP, DataChannel |

@@ -82,6 +82,8 @@ ai:
   stream_timeout_sec: 300         # timeout toàn bộ stream từ lúc mở (giây)
   max_retry: 3                    # số lần retry khi stream lỗi
   retry_backoff_ms: 1000          # thời gian chờ giữa các lần retry (ms)
+  keepalive_time_sec: 30          # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
+  keepalive_timeout_sec: 10       # đóng conn nếu không nhận PONG trong N giây
 
 # ── Result dispatcher ──────────────────────────────────────────────────────────
 result:
@@ -92,11 +94,17 @@ result:
 
 # ── HTTP callback sink ─────────────────────────────────────────────────────────
 callback:
-  timeout_ms: 1000      # timeout một HTTP POST callback (ms)
-  max_retry: 3          # số lần retry khi callback thất bại
-  retry_backoff_ms: 200 # thời gian chờ giữa các lần retry callback (ms)
+  url: ""                      # optional: URL pre-connect khi khởi động (scheme://host:port)
+                               # gateway sẽ thiết lập kết nối H/2 ngay khi start, trước khi có session đầu tiên
+                               # ví dụ: "http://mf-callback.internal:8090"
+  timeout_ms: 1000             # timeout một HTTP POST callback (ms)
+  max_retry: 3                 # số lần retry khi callback thất bại
+  retry_backoff_ms: 200        # thời gian chờ giữa các lần retry callback (ms)
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau N ms idle để giữ kết nối; 0 = không ping
+  ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong N ms
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 log:
   level: "info"    # debug | info | warn | error
   format: "json"   # json | text
+  monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt

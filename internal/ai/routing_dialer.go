@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // GRPCDialFunc mở một bidirectional gRPC stream tới AI worker tại workerAddr.
@@ -30,10 +31,13 @@ func NewRoutingDialer(registry *WorkerRegistry, dialFn GRPCDialFunc) *RoutingDia
 func (d *RoutingDialer) Dial(ctx context.Context, sessionID, streamID, language, task string) (StreamClient, error) {
 	worker, err := d.registry.Select(language, task)
 	if err != nil {
+		slog.Debug("ai: no worker available", "session_id", sessionID, "language", language, "task", task, "error", err)
 		return nil, fmt.Errorf("ai: route %s/%s: %w", language, task, err)
 	}
+	slog.Debug("ai: dialing worker", "session_id", sessionID, "worker_id", worker.ID, "worker_addr", worker.Addr, "language", language, "task", task)
 	client, err := d.dialFn(ctx, worker.Addr, sessionID, streamID, language, task)
 	if err != nil {
+		slog.Debug("ai: dial failed", "session_id", sessionID, "worker_id", worker.ID, "worker_addr", worker.Addr, "error", err)
 		return nil, fmt.Errorf("ai: dial worker %s (%s): %w", worker.ID, worker.Addr, err)
 	}
 	return client, nil

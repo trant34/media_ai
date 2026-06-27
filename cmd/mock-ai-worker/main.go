@@ -1,6 +1,6 @@
 // Command mock-ai-worker là giả lập AI worker cho môi trường lab/dev.
 //
-// Implement gRPC service /speech.SpeechStream/Recognize với JSON codec
+// Implement gRPC service /speech.SpeechStream/Recognize với protobuf codec
 // (tương thích gateway). Với mỗi session:
 //   - Mỗi 3 AudioChunk nhận được → gửi 1 partial result
 //   - Mỗi 6 AudioChunk nhận được → gửi 1 final result
@@ -12,54 +12,202 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// ── JSON codec (phải khớp với grpc_dialer.go của gateway) ────────────────────
+// ── Protobuf codec ────────────────────────────────────────────────────────────
 
-type jsonCodec struct{}
+type protoCodec struct{}
 
-func (jsonCodec) Marshal(v any) ([]byte, error)      { return json.Marshal(v) }
-func (jsonCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
-func (jsonCodec) Name() string                        { return "json" }
+func (protoCodec) Name() string { return "proto" }
 
-func init() { encoding.RegisterCodec(jsonCodec{}) }
+func (protoCodec) Marshal(v any) ([]byte, error) {
+	m, ok := v.(*recognitionResultWire)
+	if !ok {
+		return nil, fmt.Errorf("protoCodec: unsupported marshal type %T", v)
+	}
+	return marshalRecognitionResult(m), nil
+}
 
-// ── Wire types (phải khớp với grpc_dialer.go) ─────────────────────────────────
+func (protoCodec) Unmarshal(data []byte, v any) error {
+	m, ok := v.(*audioChunkWire)
+	if !ok {
+		return fmt.Errorf("protoCodec: unsupported unmarshal type %T", v)
+	}
+	return unmarshalAudioChunk(data, m)
+}
+
+func init() { encoding.RegisterCodec(protoCodec{}) }
+
+// ── Wire types ────────────────────────────────────────────────────────────────
 
 type audioChunkWire struct {
-	SessionID    string `json:"session_id"`
-	StreamID     string `json:"stream_id"`
-	PCM          []byte `json:"pcm"`
-	SampleRate   int    `json:"sample_rate"`
-	Channels     int    `json:"channels"`
-	TimestampMs  int64  `json:"timestamp_ms"`
-	DurationMs   int64  `json:"duration_ms"`
-	Language     string `json:"language,omitempty"`
-	Task         string `json:"task,omitempty"`
-	EndOfStream  bool   `json:"end_of_stream,omitempty"`
+	SessionID   string
+	StreamID    string
+	PCM         []byte
+	SampleRate  int
+	Channels    int
+	TimestampMs int64
+	DurationMs  int64
+	EndOfStream bool
+	Language    string
+	Task        string
 }
 
 type recognitionResultWire struct {
-	SessionID  string  `json:"session_id"`
-	StreamID   string  `json:"stream_id"`
-	Text       string  `json:"text"`
-	IsFinal    bool    `json:"is_final"`
-	StartMs    int64   `json:"start_ms"`
-	EndMs      int64   `json:"end_ms"`
-	Confidence float32 `json:"confidence,omitempty"`
-	Language   string  `json:"language,omitempty"`
-	Seq        uint64  `json:"seq"`
+	SessionID  string
+	StreamID   string
+	Text       string
+	IsFinal    bool
+	StartMs    int64
+	EndMs      int64
+	Confidence float32
+	Language   string
+	Seq        uint64
+}
+
+// ── Protobuf encode/decode ────────────────────────────────────────────────────
+
+func unmarshalAudioChunk(b []byte, m *audioChunkWire) error {
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return protowire.ParseError(n)
+		}
+		b = b[n:]
+		switch {
+		case num == 1 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.SessionID = v
+			b = b[n:]
+		case num == 2 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.StreamID = v
+			b = b[n:]
+		case num == 3 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.PCM = append(m.PCM[:0], v...)
+			b = b[n:]
+		case num == 4 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.SampleRate = int(int32(v))
+			b = b[n:]
+		case num == 5 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.Channels = int(int32(v))
+			b = b[n:]
+		case num == 6 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.TimestampMs = int64(v)
+			b = b[n:]
+		case num == 7 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.DurationMs = int64(v)
+			b = b[n:]
+		case num == 8 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.EndOfStream = v != 0
+			b = b[n:]
+		case num == 9 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.Language = v
+			b = b[n:]
+		case num == 10 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.Task = v
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		}
+	}
+	return nil
+}
+
+func marshalRecognitionResult(m *recognitionResultWire) []byte {
+	var b []byte
+	if m.SessionID != "" {
+		b = protowire.AppendTag(b, 1, protowire.BytesType)
+		b = protowire.AppendString(b, m.SessionID)
+	}
+	if m.StreamID != "" {
+		b = protowire.AppendTag(b, 2, protowire.BytesType)
+		b = protowire.AppendString(b, m.StreamID)
+	}
+	if m.Text != "" {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendString(b, m.Text)
+	}
+	if m.IsFinal {
+		b = protowire.AppendTag(b, 4, protowire.VarintType)
+		b = protowire.AppendVarint(b, 1)
+	}
+	if m.StartMs != 0 {
+		b = protowire.AppendTag(b, 5, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(m.StartMs))
+	}
+	if m.EndMs != 0 {
+		b = protowire.AppendTag(b, 6, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(m.EndMs))
+	}
+	if m.Confidence != 0 {
+		b = protowire.AppendTag(b, 7, protowire.Fixed32Type)
+		b = protowire.AppendFixed32(b, math.Float32bits(m.Confidence))
+	}
+	if m.Language != "" {
+		b = protowire.AppendTag(b, 8, protowire.BytesType)
+		b = protowire.AppendString(b, m.Language)
+	}
+	if m.Seq != 0 {
+		b = protowire.AppendTag(b, 9, protowire.VarintType)
+		b = protowire.AppendVarint(b, m.Seq)
+	}
+	return b
 }
 
 // ── Mock phrases ──────────────────────────────────────────────────────────────
@@ -102,27 +250,25 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			return err
 		}
 
-		// Lấy metadata từ chunk đầu tiên
 		if chunkCount == 0 {
 			sessionID = chunk.SessionID
-			streamID  = chunk.StreamID
-			language  = chunk.Language
+			streamID = chunk.StreamID
+			language = chunk.Language
 			if language == "" {
 				language = "vi"
 			}
 			startMs = chunk.TimestampMs
 			slog.Info("stream opened",
 				"session_id", sessionID,
-				"stream_id",  streamID,
-				"language",   language,
-				"task",       chunk.Task,
+				"stream_id", streamID,
+				"language", language,
+				"task", chunk.Task,
 			)
 		}
 		chunkCount++
 
 		endMs := time.Now().UnixMilli()
 
-		// Partial result mỗi 3 chunk
 		if chunkCount%3 == 0 {
 			seq++
 			partial := &recognitionResultWire{
@@ -142,7 +288,6 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			slog.Debug("sent partial", "session_id", sessionID, "seq", seq, "text", partial.Text)
 		}
 
-		// Final result mỗi 6 chunk
 		if chunkCount%6 == 0 {
 			seq++
 			final := &recognitionResultWire{
@@ -161,14 +306,13 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			}
 			slog.Info("sent final",
 				"session_id", sessionID,
-				"seq",        seq,
-				"text",       final.Text,
-				"chunks",     chunkCount,
+				"seq", seq,
+				"text", final.Text,
+				"chunks", chunkCount,
 			)
-			startMs = endMs // reset window
+			startMs = endMs
 		}
 
-		// end_of_stream: gửi final cuối cùng và đóng
 		if chunk.EndOfStream {
 			seq++
 			final := &recognitionResultWire{
@@ -186,18 +330,18 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				return err
 			}
 			slog.Info("stream closed (end_of_stream)",
-				"session_id",  sessionID,
+				"session_id", sessionID,
 				"total_chunks", chunkCount,
-				"total_seq",   seq,
+				"total_seq", seq,
 			)
 			return nil
 		}
 	}
 
 	slog.Info("stream closed (client EOF)",
-		"session_id",   sessionID,
+		"session_id", sessionID,
 		"total_chunks", chunkCount,
-		"total_seq",    seq,
+		"total_seq", seq,
 	)
 	return nil
 }
@@ -205,8 +349,8 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	addr     := flag.String("addr",      envOr("MOCK_AI_ADDR", ":50051"), "gRPC listen address")
-	logLevel := flag.String("log-level", envOr("MOCK_AI_LOG",  "info"),   "debug|info|warn|error")
+	addr := flag.String("addr", envOr("MOCK_AI_ADDR", ":50051"), "gRPC listen address")
+	logLevel := flag.String("log-level", envOr("MOCK_AI_LOG", "info"), "debug|info|warn|error")
 	flag.Parse()
 
 	var l slog.Level
@@ -221,7 +365,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             20 * time.Second, // gateway mặc định ping mỗi 30s — cho phép xuống 20s
+			PermitWithoutStream: true,             // cho phép ping khi không có stream active
+		}),
+	)
 	srv.RegisterService(&grpc.ServiceDesc{
 		ServiceName: "speech.SpeechStream",
 		HandlerType: (*any)(nil),

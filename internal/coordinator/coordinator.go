@@ -6,6 +6,8 @@
 package coordinator
 
 import (
+	"log/slog"
+	"sync"
 	"time"
 
 	"media-ai-gateway/internal/ai"
@@ -21,9 +23,10 @@ type Config struct {
 	OutSampleRate   int           // Hz sau resample (ví dụ: 16000)
 	OutChannels     int           // kênh đầu ra (thường 1 = mono)
 	ChunkMs         int           // độ dài AudioChunk gửi AI (ms)
-	CallbackTimeout time.Duration // timeout mỗi HTTP callback request
+	CallbackTimeout time.Duration // timeout mỗi HTTP callback request (dùng khi CallbackClient = nil)
 	CallbackRetry   int           // số lần retry HTTP callback (không kể lần đầu)
 	PCMDumpDir      string        // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
+	CallbackClient  *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
 }
 
 // DefaultConfig trả về cấu hình phù hợp cho production ASR.
@@ -45,6 +48,9 @@ type Coordinator struct {
 	pool       *pipeline.WorkerPool
 	aiMgr      *ai.Manager
 	dispatcher *result.Dispatcher
+
+	mu         sync.RWMutex
+	jitterBufs map[string]*jitter.Buffer // sessionID → active jitter buffer
 }
 
 // New tạo Coordinator với config và dependency cho trước.
@@ -54,6 +60,7 @@ func New(cfg Config, pool *pipeline.WorkerPool, aiMgr *ai.Manager, dispatcher *r
 		pool:       pool,
 		aiMgr:      aiMgr,
 		dispatcher: dispatcher,
+		jitterBufs: make(map[string]*jitter.Buffer),
 	}
 }
 
@@ -77,7 +84,7 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 	// 1. HTTP callback sink.
 	var cbSink *result.HTTPCallbackSink
 	if sess.CallbackURL != "" {
-		cbSink = result.NewHTTPCallbackSink(sess.CallbackURL, c.cfg.CallbackTimeout, c.cfg.CallbackRetry)
+		cbSink = c.newCallbackSink(sess.CallbackURL)
 		c.dispatcher.RegisterSink(sess.ID, cbSink)
 	}
 
@@ -120,6 +127,9 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 		<-sess.Ctx.Done()
 		c.pool.UnregisterSession(sess.ID)
 		c.dispatcher.UnregisterSinks(sess.ID)
+		c.mu.Lock()
+		delete(c.jitterBufs, sess.ID)
+		c.mu.Unlock()
 	}()
 
 	return cbSink, nil
@@ -132,6 +142,10 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 func (c *Coordinator) startJitterPump(sess *session.Session) {
 	jitterOut := make(chan pipeline.MediaPacket, 16)
 	buf := jitter.New(c.cfg.JitterConfig)
+
+	c.mu.Lock()
+	c.jitterBufs[sess.ID] = buf
+	c.mu.Unlock()
 
 	go buf.Run(sess.Ctx, jitterOut)
 
@@ -161,12 +175,72 @@ func (c *Coordinator) startJitterPump(sess *session.Session) {
 }
 
 func (c *Coordinator) resultPump(sess *session.Session) {
+	streamID := sess.ID
+	if sess.TrackID != "" {
+		streamID = sess.TrackID
+	}
 	for {
 		select {
 		case <-sess.Ctx.Done():
 			return
 		case r := <-sess.ResultQueue:
+			if r.SessionID == "" {
+				r.SessionID = sess.ID
+			}
+			if r.StreamID == "" {
+				r.StreamID = streamID
+			}
+			if r.SourceType == "" {
+				r.SourceType = sess.SourceType
+			}
+			if r.MediaResources == nil && sess.MediaResources != nil {
+				r.MediaResources = sess.MediaResources
+			}
+			slog.Debug("ai: result received",
+				"session_id", r.SessionID,
+				"stream_id", r.StreamID,
+				"is_final", r.IsFinal,
+				"text", r.Text,
+				"seq", r.Seq,
+				"confidence", r.Confidence,
+				"language", r.Language,
+				"start_ms", r.StartMs,
+				"end_ms", r.EndMs,
+			)
 			_ = c.dispatcher.Push(sess.Ctx, r)
 		}
 	}
+}
+
+// UpdateCallbackSink thay thế HTTP callback sink của session.
+// Trả về sink mới (hoặc nil nếu newURL rỗng) để caller đăng ký vào metrics.
+func (c *Coordinator) UpdateCallbackSink(sessID, newURL string) *result.HTTPCallbackSink {
+	var cbSink *result.HTTPCallbackSink
+	if newURL != "" {
+		cbSink = c.newCallbackSink(newURL)
+	}
+	c.dispatcher.ReplaceHTTPSink(sessID, cbSink)
+	return cbSink
+}
+
+// newCallbackSink tạo HTTPCallbackSink dùng shared client nếu có, hoặc per-sink transport.
+func (c *Coordinator) newCallbackSink(rawURL string) *result.HTTPCallbackSink {
+	if c.cfg.CallbackClient != nil {
+		return c.cfg.CallbackClient.NewHTTPCallbackSink(rawURL, c.cfg.CallbackRetry)
+	}
+	return result.NewHTTPCallbackSink(rawURL, c.cfg.CallbackTimeout, c.cfg.CallbackRetry)
+}
+
+// AggregateJitterStats trả về tổng hợp jitter stats từ tất cả session đang active.
+func (c *Coordinator) AggregateJitterStats() (received, released, dropped, lost uint64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, buf := range c.jitterBufs {
+		st := buf.Stats()
+		received += st.Received
+		released += st.Released
+		dropped += st.Dropped
+		lost += st.Lost
+	}
+	return
 }

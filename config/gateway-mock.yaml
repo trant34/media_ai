@@ -5,11 +5,14 @@
 # Yêu cầu: mock-ai-worker đang chạy tại 127.0.0.1:50051
 #   ./mock-ai-worker --addr :50051 --log-level debug
 #
-# Lab script:
-#   ./scripts/lab-rtp-test.sh 127.0.0.1 8080
+# Lab scripts:
+#   bash scripts/lab-rtp-test.sh          — basic RTP test (200 packets)
+#   bash scripts/test-callback-e2e.sh     — self-contained E2E callback (tự build + chạy)
+#   bash scripts/test-pcm-real-ai.sh      — G.711 60s + real AI + callback
+#   bash scripts/test-real-ai-g711.sh     — G.711 + real AI + PATCH mediaResources
 #
 # Nếu lab server có IP khác 127.0.0.1, sửa rtp.public_ip và chạy:
-#   ./scripts/lab-rtp-test.sh <LAB_IP> 8080
+#   bash scripts/lab-rtp-test.sh <LAB_IP> 8080
 
 gateway:
   name: "media-ai-gateway"
@@ -29,6 +32,7 @@ rtp:
   bind_ip: ""               # bind tất cả interface
   port_start: 40000
   port_end:   40099         # 100 per-session ports
+  socket_read_buffer: 2097152  # SO_RCVBUF 2 MiB — đủ cho lab (production dùng 4 MiB)
 
 session:
   max_sessions: 50
@@ -62,6 +66,8 @@ ai:
   stream_timeout_sec: 300
   max_retry: 2
   retry_backoff_ms: 500
+  keepalive_time_sec: 30
+  keepalive_timeout_sec: 10
 
 result:
   dispatcher_workers: 4
@@ -69,6 +75,19 @@ result:
   drop_partial_when_full: true
   send_timeout_ms: 2000
 
+# ── HTTP callback sink ─────────────────────────────────────────────────────────
+# url: pre-connect tới mock-callback-server khi gateway khởi động.
+# Khi url được đặt, gateway log: {"msg":"callback: preconnected via HTTP/2",...}
+# Thay đổi port nếu CALLBACK_PORT khác 9999.
+callback:
+  url: "http://127.0.0.1:9999"  # mock-callback-server; để trống nếu không test callback
+  timeout_ms: 5000       # timeout rộng hơn cho lab (mock-callback-server đôi khi chậm)
+  max_retry: 1           # ít retry hơn để test fail nhanh
+  retry_backoff_ms: 100
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle
+  ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong 15s
+
 log:
   level: "info"   # đổi "debug" để xem chi tiết từng bước pipeline
   format: "json"
+  monitor_interval_sec: 30  # in thống kê mỗi 30s khi test

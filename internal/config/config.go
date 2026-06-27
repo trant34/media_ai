@@ -23,6 +23,7 @@ import (
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/result"
 	"media-ai-gateway/internal/session"
+
 )
 
 // GatewayConfig là cấu hình đầy đủ cho Media AI Gateway.
@@ -115,13 +116,15 @@ type AudioSection struct {
 
 // AISection cấu hình kết nối tới AI worker và gRPC stream.
 type AISection struct {
-	GRPCTarget         string `yaml:"grpc_target"`
-	MaxActiveStreams    int    `yaml:"max_active_streams"`
-	PerStreamQueueSize int    `yaml:"per_stream_queue_size"`
-	SendTimeoutMs      int    `yaml:"send_timeout_ms"`
-	StreamTimeoutSec   int    `yaml:"stream_timeout_sec"`
-	MaxRetry           int    `yaml:"max_retry"`
-	RetryBackoffMs     int    `yaml:"retry_backoff_ms"`
+	GRPCTarget           string `yaml:"grpc_target"`
+	MaxActiveStreams      int    `yaml:"max_active_streams"`
+	PerStreamQueueSize   int    `yaml:"per_stream_queue_size"`
+	SendTimeoutMs        int    `yaml:"send_timeout_ms"`
+	StreamTimeoutSec     int    `yaml:"stream_timeout_sec"`
+	MaxRetry             int    `yaml:"max_retry"`
+	RetryBackoffMs       int    `yaml:"retry_backoff_ms"`
+	KeepaliveTimeSec     int    `yaml:"keepalive_time_sec"`    // gửi HTTP/2 PING sau N giây idle; 0 = tắt
+	KeepaliveTimeoutSec  int    `yaml:"keepalive_timeout_sec"` // đóng conn nếu không PONG trong N giây
 }
 
 // ResultSection cấu hình Result Dispatcher.
@@ -134,15 +137,19 @@ type ResultSection struct {
 
 // CallbackSection cấu hình HTTP callback sink.
 type CallbackSection struct {
-	TimeoutMs      int `yaml:"timeout_ms"`
-	MaxRetry       int `yaml:"max_retry"`
-	RetryBackoffMs int `yaml:"retry_backoff_ms"`
+	URL               string `yaml:"url"`                  // optional: pre-connect target khi app khởi động
+	TimeoutMs         int    `yaml:"timeout_ms"`
+	MaxRetry          int    `yaml:"max_retry"`
+	RetryBackoffMs    int    `yaml:"retry_backoff_ms"`
+	ReadIdleTimeoutMs int    `yaml:"read_idle_timeout_ms"` // gửi H/2 PING sau N ms idle; 0 = không ping
+	PingTimeoutMs     int    `yaml:"ping_timeout_ms"`      // đóng conn nếu không nhận PONG sau N ms
 }
 
-// LogSection cấu hình logging.
+// LogSection cấu hình logging và periodic monitor.
 type LogSection struct {
-	Level  string `yaml:"level"`  // debug | info | warn | error
-	Format string `yaml:"format"` // json | text
+	Level              string `yaml:"level"`               // debug | info | warn | error
+	Format             string `yaml:"format"`              // json | text
+	MonitorIntervalSec int    `yaml:"monitor_interval_sec"` // in chu kỳ stats; 0 = tắt
 }
 
 // Default trả về GatewayConfig với giá trị mặc định sẵn sàng cho production.
@@ -187,13 +194,15 @@ func Default() GatewayConfig {
 			ChunkMs:          500,
 		},
 		AI: AISection{
-			GRPCTarget:         "ai-router:50051",
-			MaxActiveStreams:    1000,
-			PerStreamQueueSize: 20,
-			SendTimeoutMs:      500,
-			StreamTimeoutSec:   300,
-			MaxRetry:           3,
-			RetryBackoffMs:     1000,
+			GRPCTarget:          "ai-router:50051",
+			MaxActiveStreams:     1000,
+			PerStreamQueueSize:  20,
+			SendTimeoutMs:       500,
+			StreamTimeoutSec:    300,
+			MaxRetry:            3,
+			RetryBackoffMs:      1000,
+			KeepaliveTimeSec:    30,
+			KeepaliveTimeoutSec: 10,
 		},
 		Result: ResultSection{
 			DispatcherWorkers:   16,
@@ -202,13 +211,16 @@ func Default() GatewayConfig {
 			SendTimeoutMs:       2000,
 		},
 		Callback: CallbackSection{
-			TimeoutMs:      1000,
-			MaxRetry:       3,
-			RetryBackoffMs: 200,
+			TimeoutMs:         1000,
+			MaxRetry:          3,
+			RetryBackoffMs:    200,
+			ReadIdleTimeoutMs: 30000,
+			PingTimeoutMs:     15000,
 		},
 		Log: LogSection{
-			Level:  "info",
-			Format: "json",
+			Level:              "info",
+			Format:             "json",
+			MonitorIntervalSec: 60,
 		},
 	}
 }
@@ -287,6 +299,21 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		CallbackRetry:   c.Callback.MaxRetry,
 		PCMDumpDir:      c.Audio.PCMDumpDir,
 	}
+}
+
+// ToGRPCKeepalive trả về keepalive durations cho SharedConnPool.
+func (c GatewayConfig) ToGRPCKeepalive() (keepaliveTime, keepaliveTimeout time.Duration) {
+	return time.Duration(c.AI.KeepaliveTimeSec) * time.Second,
+		time.Duration(c.AI.KeepaliveTimeoutSec) * time.Second
+}
+
+// ToCallbackHTTPClient tạo shared CallbackHTTPClient từ config.
+func (c GatewayConfig) ToCallbackHTTPClient() *result.CallbackHTTPClient {
+	return result.NewCallbackHTTPClient(
+		time.Duration(c.Callback.TimeoutMs)*time.Millisecond,
+		time.Duration(c.Callback.ReadIdleTimeoutMs)*time.Millisecond,
+		time.Duration(c.Callback.PingTimeoutMs)*time.Millisecond,
+	)
 }
 
 // ToControlPlaneServerConfig chuyển đổi sang controlplane.ServerConfig.

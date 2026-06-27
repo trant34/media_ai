@@ -45,6 +45,7 @@ import (
 	"media-ai-gateway/internal/controlplane"
 	"media-ai-gateway/internal/coordinator"
 	"media-ai-gateway/internal/ingress/rawrtp"
+	"media-ai-gateway/internal/monitor"
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/result"
 	"media-ai-gateway/internal/session"
@@ -67,6 +68,7 @@ func main() {
 	workers      := flag.Int("workers",            16,    "Audio pipeline worker pool size")
 	maxSess      := flag.Int("max-sess",           10000, "Maximum concurrent sessions")
 	logLevel     := flag.String("log-level",       "info","Log level: debug|info|warn|error")
+	pcmDumpDir  := flag.String("pcm-dump-dir",    envOr("GATEWAY_PCM_DUMP_DIR", ""), "Directory for raw PCM debug dumps (empty = disabled)")
 	flag.Parse()
 
 	// ── config ─────────────────────────────────────────────────────────────
@@ -94,6 +96,9 @@ func main() {
 		cfg.Pipeline.AudioWorkerCount = *workers
 		cfg.Session.MaxSessions      = *maxSess
 		cfg.Log.Level                = *logLevel
+		if *pcmDumpDir != "" {
+			cfg.Audio.PCMDumpDir = *pcmDumpDir
+		}
 	}
 
 	// ── logger ─────────────────────────────────────────────────────────────
@@ -122,6 +127,10 @@ func main() {
 	// TTL=0 → static worker từ config không bao giờ expire.
 	workerReg := ai.NewWorkerRegistry(0)
 
+	// Shared gRPC connection pool: 1 conn per AI worker address, dùng chung cho tất cả session.
+	kaTime, kaTimeout := cfg.ToGRPCKeepalive()
+	grpcPool := ai.NewSharedConnPool(kaTime, kaTimeout)
+
 	var aiDialer ai.Dialer
 	if cfg.AI.GRPCTarget != "" {
 		// Seed registry với static worker từ config.
@@ -131,8 +140,14 @@ func main() {
 			Addr:      cfg.AI.GRPCTarget,
 			MaxStreams: cfg.AI.MaxActiveStreams,
 		})
-		aiDialer = ai.NewRoutingDialer(workerReg, ai.NewGRPCDialFunc())
-		slog.Info("AI routing dialer active", "target", cfg.AI.GRPCTarget)
+		aiDialer = ai.NewRoutingDialer(workerReg, grpcPool.DialFunc())
+		// Pre-connect ngay khi khởi động — trigger async TCP dial, không block.
+		grpcPool.Preconnect(cfg.AI.GRPCTarget)
+		slog.Info("AI routing dialer active",
+			"target",            cfg.AI.GRPCTarget,
+			"keepalive_time",    kaTime,
+			"keepalive_timeout", kaTimeout,
+		)
 	} else {
 		// Dev/smoke-test mode: pipeline chạy đầy đủ nhưng không có transcript.
 		aiDialer = ai.NullDialer{}
@@ -142,22 +157,48 @@ func main() {
 
 	disp := result.NewDispatcher(cfg.ToDispatcherConfig())
 
-	coord := coordinator.New(cfg.ToCoordinatorConfig(), pool, aiMgr, disp)
+	// Shared H/2 callback client — pre-connect khi khởi động nếu callback.url được cấu hình.
+	callbackClient := cfg.ToCallbackHTTPClient()
+	if cfg.Callback.URL != "" {
+		preCtx, preCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		callbackClient.Preconnect(preCtx, cfg.Callback.URL)
+		preCancel()
+	}
+
+	coordCfg := cfg.ToCoordinatorConfig()
+	coordCfg.CallbackClient = callbackClient
+	coord := coordinator.New(coordCfg, pool, aiMgr, disp)
 
 	rtpRouter  := rawrtp.NewManagerRouter(sessMgr)
 	rtpIngress := rawrtp.NewIngress(cfg.ToRTPIngressConfig(), rtpRouter)
 
 	apiSrv := controlplane.NewServer(cfg.ToControlPlaneServerConfig(), sessMgr, coord, pool, aiMgr, disp)
 	apiSrv.SetRTPIngress(rtpIngress)
-	// Wire WorkerRegistry chỉ khi dùng RoutingDialer thực.
+	apiSrv.SetCallbackClient(callbackClient)
+	// Wire WorkerRegistry và gRPC pool chỉ khi dùng RoutingDialer thực.
 	// NullDialer (dev mode): bỏ qua để admission không block vì "no_ai_worker".
 	if cfg.AI.GRPCTarget != "" {
 		apiSrv.SetWorkerRegistry(workerReg)
+		apiSrv.SetGRPCPool(grpcPool)
 	}
 
 	// ── run ────────────────────────────────────────────────────────────────
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Periodic stats monitor (disabled when monitor_interval_sec = 0).
+	mon := &monitor.Monitor{
+		Interval:       time.Duration(cfg.Log.MonitorIntervalSec) * time.Second,
+		SessionMgr:     sessMgr,
+		Pool:           pool,
+		AIMgr:          aiMgr,
+		Dispatcher:     disp,
+		GRPCPool:       grpcPool,
+		CallbackClient: callbackClient,
+		PortAlloc:      apiSrv.PortAllocator(),
+		SharedIngress:  cfg.RTP.ListenAddr != "",
+	}
+	go mon.Run(ctx)
 
 	go pool.Run(ctx)
 	go disp.Run(ctx)

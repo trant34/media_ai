@@ -6,9 +6,10 @@
 //
 // Routes:
 //
-//	POST   /v1/sessions              — tạo session + khởi động pipeline
-//	GET    /v1/sessions/{id}         — lấy thông tin session
-//	DELETE /v1/sessions/{id}         — đóng session
+//	POST   /v1/vonras/call-sessions/{callId}/notify-event — BEGIN: ACK; ANSWER: tạo session + cấp RTP port
+//	POST   /v1/vonras/call-sessions/{callId}/ctrl-result  — cập nhật mediaResources + callbackUrl sau SDP negotiation
+//	DELETE /v1/vonras/call-sessions/{callId}              — đóng session (RELEASE)
+//	GET    /v1/vonras/call-sessions/{callId}              — lấy thông tin session (debug)
 //	POST   /v1/webrtc/offer          — WebRTC SDP offer/answer (source_type=webrtc)
 //	PUT    /v1/gateways/{id}/heartbeat — gateway node gửi trạng thái định kỳ
 //	GET    /health/live              — liveness probe (luôn 200 nếu process chạy)
@@ -16,6 +17,7 @@
 //	GET    /health                   — tương đương /health/live (backward compat)
 //	GET    /metrics                  — Prometheus-compatible metrics scrape
 //	GET    /v1/stats                 — aggregate stats (JSON)
+//	GET    /v1/connections           — trạng thái kết nối AI gRPC, callback H/2, RTP ports
 package controlplane
 
 import (
@@ -41,6 +43,11 @@ const defaultRegistryTTL = 30 * time.Second
 // Starter là interface được implement bởi *coordinator.Coordinator.
 type Starter interface {
 	Start(sess *session.Session) (*result.HTTPCallbackSink, error)
+}
+
+// CallbackSinkUpdater là interface cho PATCH /v1/sessions/{id} khi callback_url thay đổi.
+type CallbackSinkUpdater interface {
+	UpdateCallbackSink(sessID, newURL string) *result.HTTPCallbackSink
 }
 
 // ServerConfig cấu hình HTTP/2 control plane.
@@ -100,6 +107,10 @@ type Server struct {
 	ingress       *rawrtp.Ingress
 	cbMu          sync.Mutex
 	httpCallbacks []*result.HTTPCallbackSink
+
+	// Optional connection sources — set after construction via setter methods.
+	grpcPool       *ai.SharedConnPool
+	callbackClient *result.CallbackHTTPClient
 }
 
 // SetRTPIngress wires shared Raw RTP ingress cho metric collection tại /metrics.
@@ -113,9 +124,19 @@ func (s *Server) RegisterCallbackSink(sink *result.HTTPCallbackSink) {
 	s.cbMu.Unlock()
 }
 
+// SetGRPCPool wires SharedConnPool để expose trạng thái kết nối AI tại GET /v1/connections.
+func (s *Server) SetGRPCPool(pool *ai.SharedConnPool) { s.grpcPool = pool }
+
+// SetCallbackClient wires CallbackHTTPClient để expose trạng thái H/2 tại GET /v1/connections.
+func (s *Server) SetCallbackClient(c *result.CallbackHTTPClient) { s.callbackClient = c }
+
 // SetWorkerRegistry wires AI WorkerRegistry vào AdmissionController để kiểm tra reachability.
 // Readiness sẽ fail (reason: "no_ai_worker") khi không có fresh worker nào trong registry.
 func (s *Server) SetWorkerRegistry(r *ai.WorkerRegistry) { s.admission.SetWorkerRegistry(r) }
+
+// PortAllocator trả về per-session UDP port pool; nil nếu không cấu hình.
+// Dùng để expose port stats cho monitor.
+func (s *Server) PortAllocator() *PortAllocator { return s.portAlloc }
 
 // SetMemThreshold cấu hình ngưỡng heap allocation (bytes) cho readiness check.
 // Readiness sẽ fail (reason: "memory_pressure") khi heap vượt ngưỡng. 0 = disabled.
@@ -213,12 +234,16 @@ func (s *Server) routes() http.Handler {
 
 	v1 := r.Group("/v1")
 	{
-		v1.POST("/sessions", s.createSession)
-		v1.GET("/sessions/:id", s.getSession)
-		v1.DELETE("/sessions/:id", s.deleteSession)
+		vonras := v1.Group("/vonras/call-sessions")
+		vonras.POST("/:callId/notify-event", s.notifyEvent)
+		vonras.POST("/:callId/ctrl-result", s.ctrlResult)
+		vonras.DELETE("/:callId", s.deleteCallSession)
+		vonras.GET("/:callId", s.getCallSession)
+
 		v1.POST("/webrtc/offer", gin.WrapF(s.webrtc.ServeOffer))
 		v1.PUT("/gateways/:id/heartbeat", s.heartbeat)
 		v1.GET("/stats", s.stats)
+		v1.GET("/connections", s.connections)
 	}
 
 	r.GET("/health/live", s.healthLive)

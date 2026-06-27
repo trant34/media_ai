@@ -182,5 +182,27 @@ func (d *Dispatcher) Stats() Stats {
 	}
 }
 
+// ReplaceHTTPSink thay thế http_callback sink của session.
+// Các sink loại khác (DataChannel, v.v.) được giữ nguyên.
+// sink=nil → chỉ xóa sink cũ, không thêm mới.
+func (d *Dispatcher) ReplaceHTTPSink(sessionID string, sink *HTTPCallbackSink) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var filtered []Sink
+	for _, s := range d.sinks[sessionID] {
+		if s.Type() != "http_callback" {
+			filtered = append(filtered, s)
+		}
+	}
+	if sink != nil {
+		filtered = append(filtered, sink)
+	}
+	if len(filtered) == 0 {
+		delete(d.sinks, sessionID)
+	} else {
+		d.sinks[sessionID] = filtered
+	}
+}
+
 // QueueLen trả về số result đang chờ trong queue.
 func (d *Dispatcher) QueueLen() int { return len(d.queue) }

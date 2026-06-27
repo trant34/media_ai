@@ -7,8 +7,8 @@ option go_package = "media-ai-gateway/internal/ai/proto";
 // SpeechStream là gRPC service mà AI worker phải implement.
 // Gateway là client; AI worker là server.
 //
-// Wire encoding hiện tại: JSON (content-type: application/grpc+json).
-// Không dùng protobuf binary — không cần compile proto này để chạy gateway.
+// Wire encoding: protobuf binary (content-type: application/grpc+proto).
+// Gateway encode/decode thủ công bằng protowire — không cần compile proto này.
 // File này là contract documentation cho AI worker.
 service SpeechStream {
   // Recognize nhận stream AudioChunk từ gateway và trả stream RecognitionResult.

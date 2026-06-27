@@ -397,12 +397,12 @@ func TestStream_Recv_AllResultsDelivered_WhenCapacitySufficient(t *testing.T) {
 	}
 }
 
-func TestStream_Recv_ExitsOnEOF(t *testing.T) {
+func TestStream_Recv_UnexpectedEOF(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	fc := newFakeClient(ctx)
-	close(fc.recvCh) // EOF immediately
+	close(fc.recvCh) // EOF immediately, end_of_stream never sent
 
 	s := &Stream{SessionID: "s1"}
 
@@ -414,8 +414,55 @@ func TestStream_Recv_ExitsOnEOF(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("runRecv did not exit on EOF")
 	}
+	if s.Err() != ErrUnexpectedEOF {
+		t.Errorf("Err = %v, want ErrUnexpectedEOF", s.Err())
+	}
+}
+
+func TestStream_Recv_CleanEOF_AfterEndOfStream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fc := newFakeClient(ctx)
+	close(fc.recvCh) // EOF immediately
+
+	s := &Stream{SessionID: "s1"}
+	s.endOfStreamSent.Store(true) // gateway already sent end_of_stream
+
+	done := make(chan struct{})
+	go func() { s.runRecv(ctx, fc, make(chan pipeline.RecognitionResult, 4)); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("runRecv did not exit on clean EOF")
+	}
 	if s.Err() != nil {
-		t.Errorf("Err = %v, want nil for clean EOF", s.Err())
+		t.Errorf("Err = %v, want nil for clean EOF after end_of_stream", s.Err())
+	}
+}
+
+func TestStream_Recv_IdleTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fc := newFakeClient(ctx) // recvCh never closed — simulates hung worker
+
+	s := &Stream{
+		SessionID: "s1",
+		cfg:       Config{RecvIdleTimeout: 50 * time.Millisecond},
+	}
+
+	done := make(chan struct{})
+	go func() { s.runRecv(ctx, fc, make(chan pipeline.RecognitionResult, 4)); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("runRecv did not exit on idle timeout")
+	}
+	if s.Err() != ErrRecvIdleTimeout {
+		t.Errorf("Err = %v, want ErrRecvIdleTimeout", s.Err())
 	}
 }
 
