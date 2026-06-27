@@ -113,11 +113,11 @@ Nguyên tắc thiết kế:
 ### 4.1 Luồng Raw RTP Phase 1
 
 ```text
-Call Service
+DCSF
    |
-   | POST /v1/sessions  (source_type: "raw_rtp", ssrc?, remote_addr?)
+   | POST /v1/vonras/call-sessions/{callId}/notify-event  (event: ANSWER, selectedService: speech_to_text)
    v
-Media Control Plane
+Media Control Plane (DCAS)
    |
    | Admission check:
    |   session_capacity   — sessions ≥ 90% max          → 503, retry 5s
@@ -189,8 +189,7 @@ HTTP Callback Sink  (POST callback_url, retry giới hạn)
 ```text
 Browser/Mobile Client
    |
-   | POST /v1/sessions  (source_type: "webrtc")
-   | POST /v1/webrtc/offer  (SDP Offer)
+   | POST /v1/webrtc/offer  (SDP Offer — session provisioning TBD)
    v
 Control Plane / WebRTC Gateway
    |
@@ -234,32 +233,44 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
 
 ### Chức năng
 
-- Nhận yêu cầu tạo session từ Call Service hoặc client.
-- Chọn gateway phù hợp dựa trên tải hiện tại.
-- Cấp RTP port cho Raw RTP session.
-- Trả thông tin endpoint cho client/SBC/MGW.
-- Lưu mapping `session_id -> gateway_id`.
-- Theo dõi health/load của các gateway.
-- Từ chối session mới nếu hệ thống quá tải.
+- Nhận sự kiện cuộc gọi từ DCSF (BEGIN/ANSWER) và tạo session khi cần.
+- Cấp RTP port cho session audio (per-session port pool).
+- Trả `local_non_dc_media` (SDP endpoint) để DCSF forward cho MF.
+- Cập nhật `remote_addr` và `callback_url` khi nhận ctrl-result từ DCSF.
+- Theo dõi health/load và từ chối session mới nếu hệ thống quá tải.
 
-### Input
+### Input — notify-event (ANSWER)
 
 ```json
 {
-  "id": "call-001",
-  "source_type": "raw_rtp",
-  "ssrc": 12345,
-  "codec": "PCMU",
-  "sample_rate": 8000,
-  "channels": 1,
-  "callback_url": "http://call-service/api/v1/asr/result",
-  "language": "vi",
-  "task": "transcribe",
-  "remote_addr": "10.0.1.5:5060"
+  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "event": "ANSWER",
+  "selectedService": "speech_to_text",
+  "direction": "MT",
+  "role": "terminator",
+  "bearerCapability": "VIDEO",
+  "calling": "86156****5398",
+  "called": "86156****5399"
 }
 ```
 
-> `remote_addr` cần cung cấp khi dùng shared ingress và `ssrc = 0` (xem §4.1).
+> Codec được suy từ `selectedService`: `speech_to_text` / `realtime_translation` → PCMU/8000.  
+> `ssrc` và `remote_addr` không có trong ANSWER body — dùng per-session port pool, remote_addr được set sau qua ctrl-result.
+
+### Input — ctrl-result
+
+```json
+{
+  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "mediaResources": {
+    "tCore":   { "contextId": "ctx-001", "terminationId": "term-001", "endpoint": "10.1.1.1:5060" },
+    "tAccess": { "contextId": "ctx-002", "terminationId": "term-002", "endpoint": "192.168.1.10:5100" }
+  },
+  "callbackUrl": "http://mf-host:9090/asr-results"
+}
+```
+
+> `tAccess.endpoint` tự động được dùng làm `remote_addr`. `callbackUrl` là DCSF extension.
 
 ### Output
 
@@ -295,14 +306,16 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
 gin.New()
   └─ gin.Recovery()      — recover panic, trả 500
   └─ ginLogger()         — log mỗi request bằng slog (xem bên dưới)
-       └─ /v1/sessions        POST / GET / DELETE
-       └─ /v1/webrtc/offer    POST
-       └─ /v1/gateways/:id/heartbeat  PUT
-       └─ /v1/stats           GET
-       └─ /health/live        GET
-       └─ /health/ready       GET
-       └─ /health             GET  (backward compat)
-       └─ /metrics            GET
+       └─ /v1/vonras/call-sessions/:callId/notify-event   POST
+       └─ /v1/vonras/call-sessions/:callId/ctrl-result    POST
+       └─ /v1/vonras/call-sessions/:callId                DELETE / GET
+       └─ /v1/webrtc/offer                                POST
+       └─ /v1/gateways/:id/heartbeat                      PUT
+       └─ /v1/stats                                       GET
+       └─ /health/live                                    GET
+       └─ /health/ready                                   GET
+       └─ /health                                         GET  (backward compat)
+       └─ /metrics                                        GET
 ```
 
 **Hai chế độ TLS:**
@@ -1746,9 +1759,9 @@ internal/
 
   controlplane/
     server.go             — Server struct, NewServer, routes() (gin.Engine), ListenAndServe
-    handler.go            — gin handlers (createSession, getSession, deleteSession, …) + metricsWrite
+    handler.go            — gin handlers (notifyEvent, handleAnswer, ctrlResult, getCallSession, deleteCallSession, …) + metricsWrite
     middleware.go         — ginLogger: slog request logging middleware
-    types.go              — CreateSessionRequest, SessionResponse, ErrorResponse, StatsResponse
+    types.go              — SessionEvent, CtrlResultRequest, SessionResponse, ErrorResponse, StatsResponse
     gateway_registry.go   — GatewayRegistry (TTL-based, thread-safe)
     gateway_selector.go   — GatewaySelector (load-aware routing)
     admission_controller.go — AdmissionController (6 điều kiện reject)
@@ -1826,39 +1839,67 @@ internal/
 
 ## 7. API chính
 
-## 7.1 Tạo Raw RTP session
+## 7.1 Notify Event — DCSF → DCAS
 
 ```http
-POST /v1/sessions
+POST /v1/vonras/call-sessions/{callId}/notify-event
 ```
+
+### BEGIN event
 
 Request:
 
 ```json
 {
-  "id": "call-001",
-  "source_type": "raw_rtp",
-  "ssrc": 12345,
-  "codec": "PCMU",
-  "sample_rate": 8000,
-  "channels": 1,
-  "callback_url": "http://call-service/api/v1/asr/result",
-  "language": "vi",
-  "task": "transcribe",
-  "remote_addr": "10.0.1.5:5060"
+  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "event": "BEGIN",
+  "direction": "MT",
+  "role": "terminator",
+  "bearerCapability": "VIDEO",
+  "calling": "86156****5398",
+  "called": "86156****5399"
 }
 ```
 
-Response:
+Response: `200 OK {}` — DCAS ghi nhận, không tạo session.
+
+### ANSWER event
+
+Request:
 
 ```json
 {
-  "session_id": "call-001",
+  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "event": "ANSWER",
+  "selectedService": "speech_to_text",
+  "direction": "MT",
+  "role": "terminator",
+  "bearerCapability": "VIDEO",
+  "location": {
+    "areaNumber": "0755",
+    "ncgi": "46070094F34050",
+    "tac": "000002"
+  },
+  "calling": "86156****5398",
+  "called": "86156****5399"
+}
+```
+
+Response `201 Created`:
+
+```json
+{
+  "session_id": "p2uc31@[FC00:0DB8::]",
   "gateway_id": "gw-02",
   "rtp_ip": "10.10.10.22",
   "rtp_port": 40028,
-  "status": "created",
+  "status": "CREATED",
   "source_type": "raw_rtp",
+  "codec": "PCMU",
+  "sample_rate": 8000,
+  "channels": 1,
+  "task": "speech_to_text",
+  "created_at": "2026-06-27T08:00:00Z",
   "local_non_dc_media": {
     "sdpmLine": "audio 40028 RTP/AVP 0",
     "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
@@ -1866,34 +1907,61 @@ Response:
 }
 ```
 
-> `rtp_ip`, `rtp_port`, `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật).  
-> `local_non_dc_media` là SDP mô tả gateway endpoint — DCAS dùng làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
->
-> **`ssrc`** (optional): nếu SBC/MGW gửi packet có SSRC cố định, cung cấp để shared ingress route chính xác.
->
-> **`remote_addr`** (optional, format `"ip:port"`): địa chỉ UDP nguồn của SBC/MGW. **Bắt buộc** khi dùng shared ingress (`rtp.port_start = 0`) và `ssrc = 0` — nếu thiếu, tất cả packet có SSRC=0 sẽ bị drop. Không cần khi dùng per-session listener.
+> `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật).  
+> DCSF dùng `local_non_dc_media` làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).  
+> Service chưa xử lý (ví dụ `fun_calling`) → `200 OK {}`, không tạo session.
 
-## 7.2 Tạo WebRTC session
+**Codec mapping theo `selectedService`:**
 
-**Bước 1** — Tạo session:
+| selectedService | codec | sample_rate |
+|---|---|---|
+| `speech_to_text` | PCMU | 8000 |
+| `realtime_translation` | PCMU | 8000 |
+| khác (fun_calling…) | — (ACK không tạo session) | — |
+
+## 7.2 Ctrl Result — DCSF forward kết quả SDP negotiation
 
 ```http
-POST /v1/sessions
+POST /v1/vonras/call-sessions/{callId}/ctrl-result
 ```
+
+Request:
 
 ```json
 {
-  "id": "web-001",
-  "source_type": "webrtc",
-  "codec": "opus",
-  "sample_rate": 48000,
-  "channels": 2,
-  "language": "vi",
-  "task": "transcribe"
+  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "actionResults": [...],
+  "mediaResources": {
+    "tCore":   { "contextId": "ctx-001", "terminationId": "term-core-001", "endpoint": "10.1.1.1:5060" },
+    "tAccess": { "contextId": "ctx-002", "terminationId": "term-access-001", "endpoint": "192.168.1.10:5100" }
+  },
+  "callbackUrl": "http://mf-host:9090/asr-results"
 }
 ```
 
-**Bước 2** — Gửi SDP Offer:
+Response `200 OK`: SessionResponse (cùng schema với ANSWER response).
+
+> `tAccess.endpoint` tự động được set làm `remote_addr` cho RTP routing.  
+> `callbackUrl` là DCSF extension — không có trong 3GPP spec.  
+> `actionResults` được chấp nhận nhưng không xử lý (forward-compatible).
+
+## 7.3 Lấy thông tin session (debug)
+
+```http
+GET /v1/vonras/call-sessions/{callId}
+```
+
+Response `200 OK`: SessionResponse (không có `rtp_ip`, `rtp_port`, `local_non_dc_media`).
+
+## 7.4 Đóng session (RELEASE)
+
+```http
+DELETE /v1/vonras/call-sessions/{callId}
+```
+
+DCSF gọi khi nhận RELEASE event từ IMS-AS. Response: `204 No Content`.
+
+## 7.5 WebRTC offer/answer
 
 ```http
 POST /v1/webrtc/offer
@@ -1907,50 +1975,21 @@ POST /v1/webrtc/offer
 }
 ```
 
-Response (không dùng UDP Proxy):
-
-```json
-{
-  "session_id": "web-001",
-  "type": "answer",
-  "sdp": "v=0\r\n..."
-}
-```
-
-Response (UDP Proxy Mode 2.2 bật):
+Response:
 
 ```json
 {
   "session_id": "web-001",
   "type": "answer",
   "sdp": "v=0\r\n...",
-  "udp_proxy_port": 54321
+  "udp_proxy_port": 0
 }
 ```
 
-## 7.3 Lấy thông tin session
-
-```http
-GET /v1/sessions/{session_id}
-```
-
-## 7.4 Đóng session
-
-```http
-DELETE /v1/sessions/{session_id}
-```
-
-## 7.5 Gateway heartbeat
+## 7.6 Gateway heartbeat
 
 ```http
 PUT /v1/gateways/{id}/heartbeat
-```
-
-## 7.6 Subscribe transcript WebSocket
-
-```text
-GET /v1/sessions/{session_id}/transcript/ws   (TODO: §5.20)
-GET /v1/sessions/{session_id}/transcript/sse  (TODO: §5.20)
 ```
 
 ## 7.7 Health / Metrics
@@ -1960,6 +1999,7 @@ GET /health/live    — liveness probe (luôn 200)
 GET /health/ready   — readiness probe (503 khi quá tải / no AI worker)
 GET /metrics        — Prometheus text format
 GET /v1/stats       — aggregate stats JSON
+GET /v1/connections — trạng thái AI gRPC, callback H/2, RTP ports
 ```
 
 ---
