@@ -76,11 +76,14 @@ result:
   send_timeout_ms: 2000
 
 # ── HTTP callback sink ─────────────────────────────────────────────────────────
-# url: pre-connect tới mock-callback-server khi gateway khởi động.
+# url: pre-connect (warm-up H/2) tới callback server khi gateway khởi động.
+#   — KHÔNG phải URL dùng để gửi kết quả; URL đó đến từ DCSF qua ctrl-result
+#     (mediaResources.tCore.callbackUrl / mediaResources.tAccess.callbackUrl).
+#   — Nên đặt trùng host với callbackUrl mà DCSF sẽ gửi để tận dụng H/2 connection pool.
 # Khi url được đặt, gateway log: {"msg":"callback: preconnected via HTTP/2",...}
-# Thay đổi port nếu CALLBACK_PORT khác 9999.
+# Để trống nếu DCSF callback tới nhiều host khác nhau hoặc không cần warm-up.
 callback:
-  url: "http://127.0.0.1:9999"  # mock-callback-server; để trống nếu không test callback
+  url: "http://127.0.0.1:9999"  # mock-callback-server preconnect; để trống nếu không test callback
   timeout_ms: 5000       # timeout rộng hơn cho lab (mock-callback-server đôi khi chậm)
   max_retry: 1           # ít retry hơn để test fail nhanh
   retry_backoff_ms: 100

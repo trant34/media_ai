@@ -100,14 +100,16 @@ result:
   send_timeout_ms:        2000
 
 # ── HTTP callback → MF HTTP/2 server ─────────────────────────────────────────
-# callback_url được DCAS set per-session trong POST /v1/sessions, trỏ đến HTTP/2 server của MF.
-# MF HTTP/2 server phải hỗ trợ HTTP/2 cleartext (H2C).
-# url (optional): địa chỉ MF callback server để pre-connect khi gateway khởi động;
-#   giúp warm-up H/2 connection pool trước khi có session đầu tiên.
+# URL thực tế để gửi ASR transcript đến từ DCSF qua ctrl-result, per-termination:
+#   mediaResources.tCore.callbackUrl   → session {callId}-tcore
+#   mediaResources.tAccess.callbackUrl → session {callId}-taccess
+# MF HTTP/2 server phải hỗ trợ H2C (cleartext) hoặc TLS+H2.
+# url: pre-connect (warm-up H/2) khi khởi động — không phải URL gửi kết quả.
+#   Đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 connection pool.
 #   Tất cả session cùng callback host tái sử dụng chung 1 kết nối H/2 duy nhất.
 # Xem docs/callback.md để biết chi tiết format bản tin.
 callback:
-  url: "http://mf-callback.internal:8090"  # pre-connect target khi khởi động (thay bằng host thực)
+  url: "http://mf-callback.internal:8090"  # pre-connect warm-up (thay bằng host thực của MF)
   timeout_ms:        2000   # IMS AS thường respond trong <1s; 2s an toàn
   max_retry:         3
   retry_backoff_ms:  500    # backoff dài hơn — tránh storm khi AS bận

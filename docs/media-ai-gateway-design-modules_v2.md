@@ -126,16 +126,16 @@ Media Control Plane (DCAS)
    |   no_ai_worker       — WorkerRegistry rỗng          → 503, retry 3s
    |   memory_pressure    — heap ≥ memThreshold           → 503, retry 5s
    |   port_exhausted     — portAlloc.Available() == 0   → 503, retry 10s
-   | sessionMgr.Create → đăng ký ssrcIndex (khi ssrc != 0)
-   |                    → đăng ký addrIndex (khi remote_addr != "")
-   | Allocate per-session RTP port (khi RTPPortStart > 0)
-   | StartSessionListener → bind UDP socket
-   | coord.Start(sess) → khởi động full pipeline
-   |   → trả *HTTPCallbackSink (nếu callback_url có) → RegisterCallbackSink
+   | sessionMgr.Create({callId}-tcore)  → đăng ký 2 session nội bộ
+   | sessionMgr.Create({callId}-taccess)
+   | Allocate port1 (tcore) + port2 (taccess) từ per-session port pool
+   | StartSessionListener(tcore, port1) → bind UDP socket
+   | StartSessionListener(taccess, port2) → bind UDP socket
+   | coord.Start(sessTCore) + coord.Start(sessAccess) → khởi động 2 pipeline
    v
-   | trả { rtp_ip, rtp_port, gateway_id, status }
+   | trả { rtp_ip, tcore_rtp_port, taccess_rtp_port, tcore_local_non_dc_media, taccess_local_non_dc_media }
    v
-SBC/MGW gửi RTP tới Gateway
+MF gửi tCore RTP → port1, tAccess RTP → port2
    |
    v
 Raw RTP Ingress
@@ -233,17 +233,17 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
 
 ### Chức năng
 
-- Nhận sự kiện cuộc gọi từ DCSF (BEGIN/ANSWER) và tạo session khi cần.
-- Cấp RTP port cho session audio (per-session port pool).
-- Trả `local_non_dc_media` (SDP endpoint) để DCSF forward cho MF.
-- Cập nhật `remote_addr` và `callback_url` khi nhận ctrl-result từ DCSF.
+- Nhận sự kiện cuộc gọi từ DCSF (BEGIN/ANSWER) và tạo **2 session** khi cần: `{callId}-tcore` (luồng core) và `{callId}-taccess` (luồng subscriber).
+- Cấp **2 RTP port** (một per stream) từ per-session port pool.
+- Trả `tcore_local_non_dc_media` và `taccess_local_non_dc_media` (SDP endpoint) để DCSF forward cho MF.
+- Cập nhật `contextId`, `terminationId`, per-termination `callbackUrl` khi nhận ctrl-result từ DCSF.
 - Theo dõi health/load và từ chối session mới nếu hệ thống quá tải.
 
 ### Input — notify-event (ANSWER)
 
 ```json
 {
-  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "callId": "p2uc31@[FC00:0DB8::]",
   "event": "ANSWER",
   "selectedService": "speech_to_text",
   "direction": "MT",
@@ -261,16 +261,26 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
 
 ```json
 {
-  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "callId": "p2uc31@[FC00:0DB8::]",
   "mediaResources": {
-    "tCore":   { "contextId": "ctx-001", "terminationId": "term-001", "endpoint": "10.1.1.1:5060" },
-    "tAccess": { "contextId": "ctx-002", "terminationId": "term-002", "endpoint": "192.168.1.10:5100" }
-  },
-  "callbackUrl": "http://mf-host:9090/asr-results"
+    "tCore": {
+      "contextId": "ctx-001",
+      "termination": { "terminationId": "term-core-001", "medias": [...] },
+      "callbackUrl": "http://dcsf.example.com/callback/tcore"
+    },
+    "tAccess": {
+      "contextId": "ctx-002",
+      "termination": { "terminationId": "term-access-001", "medias": [...] },
+      "callbackUrl": "http://dcsf.example.com/callback/taccess"
+    }
+  }
 }
 ```
 
-> `tAccess.endpoint` tự động được dùng làm `remote_addr`. `callbackUrl` là DCSF extension.
+> Cấu trúc `mediaResources` theo 3GPP MRM (TS29.176): mỗi termination có `contextId` + `termination.{terminationId, medias}` + `callbackUrl`.  
+> `contextId` và `terminationId` được lưu vào session để enrich HTTP callback payload.  
+> `callbackUrl` per-termination được gán vào `sess.CallbackURL` — coordinator tạo `HTTPCallbackSink` khi giá trị này không rỗng.  
+> `medias` là `[]MediaInfo` theo 3GPP TS29.176 — được chấp nhận nhưng không parse (forward-compatible).
 
 ### Output
 
@@ -279,16 +289,28 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
   "session_id": "call-001",
   "gateway_id": "gw-02",
   "rtp_ip": "10.10.10.22",
-  "rtp_port": 40028,
-  "status": "created",
-  "local_non_dc_media": {
+  "tcore_rtp_port": 40028,
+  "taccess_rtp_port": 40029,
+  "status": "CREATED",
+  "source_type": "raw_rtp",
+  "codec": "PCMU",
+  "sample_rate": 8000,
+  "channels": 1,
+  "tcore_local_non_dc_media": {
     "sdpmLine": "audio 40028 RTP/AVP 0",
+    "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+  },
+  "taccess_local_non_dc_media": {
+    "sdpmLine": "audio 40029 RTP/AVP 0",
     "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
   }
 }
 ```
 
-> `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật). DCAS dùng field này làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
+> Mỗi call tạo **2 internal session**: `{callId}-tcore` và `{callId}-taccess` — mỗi cái 1 UDP port riêng biệt.  
+> `tcore_local_non_dc_media` / `taccess_local_non_dc_media` chỉ có khi `rtp.port_start > 0`.  
+> DCAS dùng 2 field này làm `remoteNonDcMedia` riêng cho tCore và tAccess termination khi gọi MF MRM `POST /contexts` (3GPP TS29.176).  
+> `session_id` trong response luôn là `callId` (không phải internal ID `callId-tcore`/`callId-taccess`).
 
 ### State quản lý
 
@@ -995,7 +1017,7 @@ pipeline:
 ### Quá tải
 
 - Nếu audio job queue đầy: drop packet hoặc degrade session.
-- Metric: `audio_job_queue_dropped_total`.
+- Metric: `media_ai_pool_dropped_total`.
 
 ---
 
@@ -1013,6 +1035,8 @@ Quản lý gRPC stream giữa Gateway và AI service theo từng session.
 - Reconnect tự động khi stream lỗi (exponential backoff, giới hạn `max_retry` lần).
 - Enforce `max_active_streams` và `stream_timeout`.
 - Backpressure recv: drop partial nếu `ResultQueue` đầy, block final.
+- `first_chunk_timeout`: đóng stream nếu không nhận được AudioChunk nào sau khi mở (detect session treo trước khi gửi media).
+- `recv_idle_timeout`: đóng stream nếu AI worker không trả result nào trong khoảng thời gian này (detect worker bị treo giữa chừng).
 
 ### Luồng
 
@@ -1133,7 +1157,34 @@ ai:
   retry_backoff_ms: 1000
   keepalive_time_sec: 30          # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
   keepalive_timeout_sec: 10       # đóng conn nếu không nhận PONG trong N giây
+  first_chunk_timeout_sec: 3      # đóng stream nếu không nhận chunk nào sau N giây; 0 = tắt
+  recv_idle_timeout_sec: 30       # đóng stream nếu không nhận result nào trong N giây; 0 = tắt
 ```
+
+### Latency Tracking
+
+Manager tích lũy latency stats từ tất cả stream (đang chạy và đã đóng):
+
+```go
+type ManagerStats struct {
+    TotalSendErrors uint64
+    TotalRecvErrors uint64
+    TotalRetries    uint64
+
+    // End-to-result latency: time.Now() - result.end_ms (ms)
+    LatencyCount uint64
+    LatencySum   int64
+    LatencyLast  int64
+
+    // First-result latency: ms từ stream open đến result đầu tiên
+    LatencyFirstCount uint64
+    LatencyFirstSum   int64
+}
+```
+
+- `AvgLatencyMs()` = `LatencySum / LatencyCount`
+- `AvgFirstResultMs()` = `LatencyFirstSum / LatencyFirstCount`
+- Chỉ tính khi AI worker set `end_ms` trong `RecognitionResult`.
 
 ---
 
@@ -1158,7 +1209,7 @@ type WorkerInfo struct {
     ID           string    // định danh duy nhất
     Addr         string    // gRPC address "host:port"
     Languages    []string  // ["*"] hoặc [] = hỗ trợ tất cả ngôn ngữ
-    Tasks        []string  // ["transcribe","translate"]; [] = tất cả
+    Tasks        []string  // ["transcribe","translate"]; ["*"] hoặc [] = tất cả
     Models       []string  // tên model, e.g. ["faster-whisper-medium"]
     MaxStreams    int       // giới hạn stream đồng thời; 0 = không giới hạn
     ActiveStreams int       // từ heartbeat gần nhất
@@ -1170,7 +1221,8 @@ type WorkerInfo struct {
 ### Load scoring
 
 ```text
-loadScore = activeRatio × 0.7 + GPULoad × 0.3
+loadScore = activeRatio × 0.7 + GPULoad × 0.3   (khi GPULoad > 0)
+loadScore = activeRatio                            (khi GPULoad == 0, không tính GPU)
 activeRatio = ActiveStreams / MaxStreams  (0 nếu MaxStreams == 0)
 
 Worker bị loại khi:
@@ -1218,6 +1270,12 @@ PUT /v1/ai-workers/{id}/heartbeat
 }
 ```
 TTL = 30s → worker stale nếu không heartbeat trong 30s.
+
+### Tiện ích
+
+- `Deregister(id string)` — xóa worker khỏi registry (dùng khi worker shutdown có chủ ý).
+- `List() []WorkerInfo` — trả về tất cả worker còn fresh (trong TTL); dùng cho health API.
+- `NullDialer` — Dialer giả lập cho dev/test: accept mọi `Send()`, block `Recv()` cho đến khi context cancel, không cần AI backend thật.
 
 ---
 
@@ -1851,7 +1909,7 @@ Request:
 
 ```json
 {
-  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "callId": "p2uc31@[FC00:0DB8::]",
   "event": "BEGIN",
   "direction": "MT",
   "role": "terminator",
@@ -1869,7 +1927,7 @@ Request:
 
 ```json
 {
-  "callIdentifier": "p2uc31@[FC00:0DB8::]",
+  "callId": "p2uc31@[FC00:0DB8::]",
   "event": "ANSWER",
   "selectedService": "speech_to_text",
   "direction": "MT",
@@ -1892,7 +1950,8 @@ Response `201 Created`:
   "session_id": "p2uc31@[FC00:0DB8::]",
   "gateway_id": "gw-02",
   "rtp_ip": "10.10.10.22",
-  "rtp_port": 40028,
+  "tcore_rtp_port": 40028,
+  "taccess_rtp_port": 40029,
   "status": "CREATED",
   "source_type": "raw_rtp",
   "codec": "PCMU",
@@ -1900,15 +1959,21 @@ Response `201 Created`:
   "channels": 1,
   "task": "speech_to_text",
   "created_at": "2026-06-27T08:00:00Z",
-  "local_non_dc_media": {
+  "tcore_local_non_dc_media": {
     "sdpmLine": "audio 40028 RTP/AVP 0",
+    "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+  },
+  "taccess_local_non_dc_media": {
+    "sdpmLine": "audio 40029 RTP/AVP 0",
     "sdpaLines": ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
   }
 }
 ```
 
-> `local_non_dc_media` chỉ có khi `rtp.port_start > 0` (per-session port pool bật).  
-> DCSF dùng `local_non_dc_media` làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).  
+> Mỗi ANSWER tạo **2 internal session** (`{callId}-tcore`, `{callId}-taccess`) với 2 UDP port riêng.  
+> `session_id` trong response là `callId` (không phải internal ID).  
+> `tcore/taccess_local_non_dc_media` chỉ có khi `rtp.port_start > 0`.  
+> DCSF dùng 2 field này làm `remoteNonDcMedia` riêng cho từng termination khi gọi MF MRM `POST /contexts` (TS29.176).  
 > Service chưa xử lý (ví dụ `fun_calling`) → `200 OK {}`, không tạo session.
 
 **Codec mapping theo `selectedService`:**
@@ -1929,21 +1994,27 @@ Request:
 
 ```json
 {
-  "callIdentifier": "p2uc31@[FC00:0DB8::]",
-  "actionResults": [...],
+  "callId": "p2uc31@[FC00:0DB8::]",
   "mediaResources": {
-    "tCore":   { "contextId": "ctx-001", "terminationId": "term-core-001", "endpoint": "10.1.1.1:5060" },
-    "tAccess": { "contextId": "ctx-002", "terminationId": "term-access-001", "endpoint": "192.168.1.10:5100" }
-  },
-  "callbackUrl": "http://mf-host:9090/asr-results"
+    "tCore": {
+      "contextId": "ctx-001",
+      "termination": { "terminationId": "term-core-001", "medias": [...] },
+      "callbackUrl": "http://dcsf.example.com/callback/tcore"
+    },
+    "tAccess": {
+      "contextId": "ctx-002",
+      "termination": { "terminationId": "term-access-001", "medias": [...] },
+      "callbackUrl": "http://dcsf.example.com/callback/taccess"
+    }
+  }
 }
 ```
 
-Response `200 OK`: SessionResponse (cùng schema với ANSWER response).
+Response `200 OK`: SessionResponse (cùng schema với ANSWER response, `session_id = callId`).
 
-> `tAccess.endpoint` tự động được set làm `remote_addr` cho RTP routing.  
-> `callbackUrl` là DCSF extension — không có trong 3GPP spec.  
-> `actionResults` được chấp nhận nhưng không xử lý (forward-compatible).
+> `contextId` và `terminationId` được lưu vào session để enrich HTTP callback payload.  
+> `callbackUrl` per-termination được gán vào `sess.CallbackURL` tương ứng — coordinator tạo `HTTPCallbackSink` khi giá trị này không rỗng.  
+> `medias` theo schema 3GPP MRM (TS29.176) — được chấp nhận nhưng không parse (forward-compatible).
 
 ## 7.3 Lấy thông tin session (debug)
 
@@ -1951,7 +2022,7 @@ Response `200 OK`: SessionResponse (cùng schema với ANSWER response).
 GET /v1/vonras/call-sessions/{callId}
 ```
 
-Response `200 OK`: SessionResponse (không có `rtp_ip`, `rtp_port`, `local_non_dc_media`).
+Response `200 OK`: SessionResponse với `session_id = callId`. Trả về thông tin của session `{callId}-taccess` (subscriber); nếu không tồn tại thì trả `{callId}-tcore`. Không có `tcore/taccess_rtp_port` hay `local_non_dc_media` trong response này.
 
 ## 7.4 Đóng session (RELEASE)
 
@@ -1959,7 +2030,7 @@ Response `200 OK`: SessionResponse (không có `rtp_ip`, `rtp_port`, `local_non_
 DELETE /v1/vonras/call-sessions/{callId}
 ```
 
-DCSF gọi khi nhận RELEASE event từ IMS-AS. Response: `204 No Content`.
+DCSF gọi khi nhận RELEASE event từ IMS-AS. Đóng cả 2 internal session `{callId}-tcore` và `{callId}-taccess`. Response: `204 No Content`. `404` nếu cả 2 không tồn tại.
 
 ## 7.5 WebRTC offer/answer
 

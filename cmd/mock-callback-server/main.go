@@ -38,14 +38,13 @@ import (
 )
 
 type mediaResource struct {
-	ContextID     string `json:"contextId"`
-	TerminationID string `json:"terminationId"`
-	Endpoint      string `json:"endpoint"`
+	ContextID     string `json:"contextId,omitempty"`
+	TerminationID string `json:"terminationId,omitempty"`
 }
 
 type mediaResources struct {
-	TCore   mediaResource `json:"tCore"`
-	TAccess mediaResource `json:"tAccess"`
+	TCore   *mediaResource `json:"tCore,omitempty"`
+	TAccess *mediaResource `json:"tAccess,omitempty"`
 }
 
 // callbackBody mirrors JSON body gửi bởi HTTPCallbackSink.

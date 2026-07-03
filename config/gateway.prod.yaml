@@ -68,7 +68,10 @@ result:
   drop_partial_when_full: true
   send_timeout_ms: 2000
 
+# URL callback đến từ DCSF qua ctrl-result per-termination (callbackUrl trong tCore/tAccess).
+# url: pre-connect warm-up — đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 pool.
 callback:
+  # url: "http://mf-callback.internal:8090"  # bỏ comment để bật pre-connect warm-up
   timeout_ms: 1000
   max_retry: 3
   retry_backoff_ms: 200

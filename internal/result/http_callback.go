@@ -163,8 +163,14 @@ func newCallbackPayload(r pipeline.RecognitionResult) callbackPayload {
 		RecognitionResult: r,
 	}
 	if r.MediaResources != nil {
-		p.ContextID = r.MediaResources.TAccess.ContextID
-		p.TerminationID = r.MediaResources.TAccess.TerminationID
+		mr := r.MediaResources.TAccess
+		if mr == nil || mr.ContextID == "" {
+			mr = r.MediaResources.TCore
+		}
+		if mr != nil {
+			p.ContextID = mr.ContextID
+			p.TerminationID = mr.TerminationID
+		}
 	}
 	return p
 }

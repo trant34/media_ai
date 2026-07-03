@@ -43,10 +43,6 @@ const defaultRegistryTTL = 30 * time.Second
 // Starter là interface được implement bởi *coordinator.Coordinator.
 type Starter interface {
 	Start(sess *session.Session) (*result.HTTPCallbackSink, error)
-}
-
-// CallbackSinkUpdater là interface cho PATCH /v1/sessions/{id} khi callback_url thay đổi.
-type CallbackSinkUpdater interface {
 	UpdateCallbackSink(sessID, newURL string) *result.HTTPCallbackSink
 }
 

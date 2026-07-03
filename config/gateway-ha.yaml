@@ -105,7 +105,11 @@ result:
   send_timeout_ms:        2000
 
 # ── HTTP callback ─────────────────────────────────────────────────────────────
+# URL thực tế đến từ DCSF qua ctrl-result per-termination (callbackUrl trong tCore/tAccess).
+# url (optional): pre-connect warm-up — đặt trùng host với callbackUrl DCSF sẽ gửi.
+# Trong HA, tất cả node đều dùng chung H/2 transport → kết nối được pool per-host.
 callback:
+  # url: "http://mf-callback.internal:8090"  # bỏ comment để bật pre-connect warm-up
   timeout_ms:            1000
   max_retry:             3
   retry_backoff_ms:      200

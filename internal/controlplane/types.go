@@ -5,24 +5,31 @@ import (
 	"time"
 )
 
-// MediaResource identifies an H.248/MEGACO media termination.
-type MediaResource struct {
-	ContextID     string `json:"contextId"`
-	TerminationID string `json:"terminationId"`
-	Endpoint      string `json:"endpoint"`
+// TerminationInfo mô tả một H.248 termination theo 3GPP TS29.176 TerminationInfo schema.
+// Medias là mảng MediaInfo (TS29.176 §MediaInfo) — giữ raw để forward-compat, gateway không parse.
+type TerminationInfo struct {
+	TerminationID string          `json:"terminationId"`
+	Medias        json.RawMessage `json:"medias,omitempty"` // []MediaInfo per TS29.176
 }
 
-// MediaResources holds the H.248 terminations provided by DCAS after SDP negotiation.
+// MediaResourceInfo mô tả một termination resource trong ctrl-result từ DCSF.
+type MediaResourceInfo struct {
+	ContextID   string         `json:"contextId"`
+	Termination TerminationInfo `json:"termination"`
+	CallbackURL string         `json:"callbackUrl,omitempty"`
+}
+
+// MediaResources giữ thông tin tCore và tAccess termination từ DCSF ctrl-result.
 type MediaResources struct {
-	TCore   MediaResource `json:"tCore"`
-	TAccess MediaResource `json:"tAccess"`
+	TCore   MediaResourceInfo `json:"tCore"`
+	TAccess MediaResourceInfo `json:"tAccess"`
 }
 
 // SessionEvent là JSON body cho POST /v1/vonras/call-sessions/{callId}/notify-event.
 // Body gửi thẳng các field — không bọc trong wrapper.
 // SessionEvent mô tả sự kiện phiên từ DCSF.
 type SessionEvent struct {
-	CallIdentifier   string         `json:"callIdentifier"`
+	CallID   string         `json:"callId"`
 	Event            string         `json:"event"`                      // "BEGIN" | "ANSWER"
 	SelectedService  string         `json:"selectedService,omitempty"`
 	Direction        string         `json:"direction,omitempty"`
@@ -41,12 +48,10 @@ type EventLocation struct {
 }
 
 // CtrlResultRequest là JSON body cho POST /v1/vonras/call-sessions/{callId}/ctrl-result.
-// callbackUrl là DCSF extension — không có trong 3GPP spec, dùng để set ASR callback sau SDP negotiation.
+// callbackUrl nằm bên trong mỗi MediaResourceInfo (per-termination), không phải top-level.
 type CtrlResultRequest struct {
-	CallIdentifier string          `json:"callIdentifier"`
-	ActionResults  json.RawMessage `json:"actionResults,omitempty"` // forward-compatible, không parse
+	CallID string          `json:"callId"`
 	MediaResources *MediaResources `json:"mediaResources,omitempty"`
-	CallbackURL    string          `json:"callbackUrl,omitempty"`
 }
 
 // NonDcMedia mô tả RTP endpoint theo định dạng SDP (dùng cho 3GPP MRM API).
@@ -72,10 +77,13 @@ type SessionResponse struct {
 	CreatedAt  time.Time `json:"created_at"`
 
 	// Populated on CREATE for raw_rtp sessions with per-session port pool.
-	GatewayID       string      `json:"gateway_id,omitempty"`
-	RTPIP           string      `json:"rtp_ip,omitempty"`
-	RTPPort         int         `json:"rtp_port,omitempty"`
-	LocalNonDcMedia *NonDcMedia `json:"local_non_dc_media,omitempty"`
+	// Each call allocates 2 ports: one for tCore stream, one for tAccess stream.
+	GatewayID             string      `json:"gateway_id,omitempty"`
+	RTPIP                 string      `json:"rtp_ip,omitempty"`
+	TCoreRTPPort          int         `json:"tcore_rtp_port,omitempty"`
+	TAccessRTPPort        int         `json:"taccess_rtp_port,omitempty"`
+	TCoreLocalNonDcMedia  *NonDcMedia `json:"tcore_local_non_dc_media,omitempty"`
+	TAccessLocalNonDcMedia *NonDcMedia `json:"taccess_local_non_dc_media,omitempty"`
 }
 
 // StatsResponse là JSON response cho GET /v1/stats.

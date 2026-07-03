@@ -105,6 +105,15 @@ paths:
                   confidence: 0.92
                   language: "vi"
                   seq: 3
+                  contextId: "ctx-002"
+                  terminationId: "term-access-001"
+                  mediaResources:
+                    tCore:
+                      contextId: "ctx-001"
+                      terminationId: "term-core-001"
+                    tAccess:
+                      contextId: "ctx-002"
+                      terminationId: "term-access-001"
       responses:
         "200":
           description: Nhận thành công — gateway không retry
@@ -165,7 +174,7 @@ components:
         session_id:
           type: string
           description: |
-            ID session (khớp với `id` trong `POST /v1/sessions`).
+            ID session — bằng `callId` (callId từ DCSF notify-event ANSWER).
             Dùng để phân biệt nguồn khi MF nhận callback từ nhiều session đồng thời.
           example: "call-abc123"
 
@@ -250,17 +259,31 @@ components:
               (cùng `session_id` + `seq` = cùng một kết quả).
           example: 3
 
+        contextId:
+          type: string
+          description: |
+            H.248 context ID — flattened từ `mediaResources.tAccess.contextId`
+            (fallback sang `tCore` nếu tAccess chưa được cập nhật).
+            Omit nếu DCSF chưa gọi ctrl-result.
+          example: "ctx-002"
+        terminationId:
+          type: string
+          description: |
+            H.248 termination ID — flattened từ `mediaResources.tAccess.terminationId`
+            (fallback sang `tCore` nếu tAccess chưa được cập nhật).
+            Omit nếu DCSF chưa gọi ctrl-result.
+          example: "term-access-001"
         mediaResources:
           description: |
-            H.248/MEGACO termination info của session — được DCAS cung cấp qua
-            `PATCH /v1/sessions/{id}`. Omit nếu DCAS chưa gọi PATCH hoặc không cung cấp.
+            H.248/MEGACO termination info của session — được cập nhật qua
+            `POST .../ctrl-result`. Omit nếu DCSF chưa gọi ctrl-result.
             MF dùng để correlate kết quả ASR về đúng H.248 context/termination.
           allOf:
             - $ref: "#/components/schemas/MediaResources"
 
     MediaResource:
       type: object
-      description: H.248/MEGACO media termination identifier.
+      description: H.248/MEGACO media termination identifier (flat, trong callback payload).
       properties:
         contextId:
           type: string
@@ -270,10 +293,6 @@ components:
           type: string
           description: H.248 termination ID
           example: "term-access-001"
-        endpoint:
-          type: string
-          description: RTP endpoint "ip:port"
-          example: "192.168.1.10:5100"
 
     MediaResources:
       type: object

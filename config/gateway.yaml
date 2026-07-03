@@ -93,9 +93,13 @@ result:
   send_timeout_ms: 2000         # timeout gửi một result tới sink (ms)
 
 # ── HTTP callback sink ─────────────────────────────────────────────────────────
+# URL thực tế để gửi ASR transcript đến từ DCSF qua ctrl-result, per-termination:
+#   mediaResources.tCore.callbackUrl   → session {callId}-tcore
+#   mediaResources.tAccess.callbackUrl → session {callId}-taccess
+# Tất cả session cùng callback host tái sử dụng chung 1 kết nối H/2 duy nhất.
 callback:
-  url: ""                      # optional: URL pre-connect khi khởi động (scheme://host:port)
-                               # gateway sẽ thiết lập kết nối H/2 ngay khi start, trước khi có session đầu tiên
+  url: ""                      # optional: pre-connect (warm-up H/2) khi khởi động — không phải URL gửi kết quả
+                               # nên đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 pool
                                # ví dụ: "http://mf-callback.internal:8090"
   timeout_ms: 1000             # timeout một HTTP POST callback (ms)
   max_retry: 3                 # số lần retry khi callback thất bại

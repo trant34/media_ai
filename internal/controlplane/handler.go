@@ -35,7 +35,8 @@ func (s *Server) notifyEvent(c *gin.Context) {
 	}
 }
 
-// handleAnswer processes ANSWER event: create session + allocate per-session RTP port.
+// handleAnswer processes ANSWER event: create 2 sessions (tcore + taccess) + allocate 2 RTP ports.
+// Each call maps to 2 internal sessions: {callID}-tcore and {callID}-taccess.
 func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent) {
 	codec, sampleRate, supported := serviceToCodec(event.SelectedService)
 	if !supported {
@@ -49,14 +50,18 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		return
 	}
 
-	sess, err := s.sessionMgr.Create(session.SessionConfig{
-		ID:         callID,
+	tcoreID := callID + "-tcore"
+	taccessID := callID + "-taccess"
+	baseCfg := session.SessionConfig{
 		SourceType: "raw_rtp",
 		Codec:      codec,
 		SampleRate: sampleRate,
 		Channels:   1,
 		Task:       event.SelectedService,
-	})
+	}
+
+	baseCfg.ID = tcoreID
+	sessTCore, err := s.sessionMgr.Create(baseCfg)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrDuplicateID):
@@ -68,41 +73,91 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		}
 		return
 	}
-	sess.GatewayID = s.cfg.GatewayID
+	sessTCore.GatewayID = s.cfg.GatewayID
 
-	var rtpPort int
+	baseCfg.ID = taccessID
+	sessAccess, err := s.sessionMgr.Create(baseCfg)
+	if err != nil {
+		s.sessionMgr.Close(tcoreID)
+		switch {
+		case errors.Is(err, session.ErrDuplicateID):
+			c.JSON(http.StatusConflict, ErrorResponse{Error: err.Error()})
+		case errors.Is(err, session.ErrMaxSessions):
+			c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: err.Error(), RetryAfterMs: 5000})
+		default:
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		}
+		return
+	}
+	sessAccess.GatewayID = s.cfg.GatewayID
+
+	var tcorePort, taccessPort int
 	if s.portAlloc != nil {
-		port, err := s.portAlloc.Acquire()
+		p1, err := s.portAlloc.Acquire()
 		if err != nil {
-			s.sessionMgr.Close(sess.ID)
+			s.sessionMgr.Close(tcoreID)
+			s.sessionMgr.Close(taccessID)
 			c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "no RTP ports available", RetryAfterMs: 10000})
 			return
 		}
-		if err := rawrtp.StartSessionListener(sess, s.cfg.RTPBindIP, port, s.portAlloc); err != nil {
-			s.portAlloc.Release(port)
-			s.sessionMgr.Close(sess.ID)
+		p2, err := s.portAlloc.Acquire()
+		if err != nil {
+			s.portAlloc.Release(p1)
+			s.sessionMgr.Close(tcoreID)
+			s.sessionMgr.Close(taccessID)
+			c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "no RTP ports available", RetryAfterMs: 10000})
+			return
+		}
+		if err := rawrtp.StartSessionListener(sessTCore, s.cfg.RTPBindIP, p1, s.portAlloc); err != nil {
+			s.portAlloc.Release(p1)
+			s.portAlloc.Release(p2)
+			s.sessionMgr.Close(tcoreID)
+			s.sessionMgr.Close(taccessID)
 			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "rtp: " + err.Error()})
 			return
 		}
-		rtpPort = port
+		if err := rawrtp.StartSessionListener(sessAccess, s.cfg.RTPBindIP, p2, s.portAlloc); err != nil {
+			// tcore listener goroutine running — closing tcoreID cancels its ctx → releases p1
+			s.portAlloc.Release(p2)
+			s.sessionMgr.Close(tcoreID)
+			s.sessionMgr.Close(taccessID)
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "rtp: " + err.Error()})
+			return
+		}
+		tcorePort = p1
+		taccessPort = p2
 	}
 
-	cbSink, err := s.coord.Start(sess)
+	cbSink1, err := s.coord.Start(sessTCore)
 	if err != nil {
-		s.sessionMgr.Close(sess.ID)
+		s.sessionMgr.Close(tcoreID)
+		s.sessionMgr.Close(taccessID)
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "pipeline: " + err.Error()})
 		return
 	}
-	if cbSink != nil {
-		s.RegisterCallbackSink(cbSink)
+	cbSink2, err := s.coord.Start(sessAccess)
+	if err != nil {
+		s.sessionMgr.Close(tcoreID)
+		s.sessionMgr.Close(taccessID)
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "pipeline: " + err.Error()})
+		return
+	}
+	if cbSink1 != nil {
+		s.RegisterCallbackSink(cbSink1)
+	}
+	if cbSink2 != nil {
+		s.RegisterCallbackSink(cbSink2)
 	}
 
-	resp := sessionToResponse(sess)
+	resp := sessionToResponse(sessTCore)
+	resp.SessionID = callID
 	resp.GatewayID = s.cfg.GatewayID
-	if rtpPort != 0 {
+	if tcorePort != 0 {
 		resp.RTPIP = s.cfg.RTPPublicIP
-		resp.RTPPort = rtpPort
-		resp.LocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, rtpPort, 0)
+		resp.TCoreRTPPort = tcorePort
+		resp.TAccessRTPPort = taccessPort
+		resp.TCoreLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, tcorePort, 0)
+		resp.TAccessLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, taccessPort, 0)
 	}
 	c.JSON(http.StatusCreated, resp)
 }
@@ -119,17 +174,24 @@ func serviceToCodec(service string) (codec string, sampleRate int, ok bool) {
 }
 
 // getCallSession handles GET /v1/vonras/call-sessions/:callId.
+// Looks up {callId}-taccess first (subscriber side), falls back to {callId}-tcore.
 func (s *Server) getCallSession(c *gin.Context) {
-	sess, ok := s.sessionMgr.Get(c.Param("callId"))
+	callID := c.Param("callId")
+	sess, ok := s.sessionMgr.Get(callID + "-taccess")
+	if !ok {
+		sess, ok = s.sessionMgr.Get(callID + "-tcore")
+	}
 	if !ok {
 		c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
 		return
 	}
-	c.JSON(http.StatusOK, sessionToResponse(sess))
+	resp := sessionToResponse(sess)
+	resp.SessionID = callID
+	c.JSON(http.StatusOK, resp)
 }
 
 // ctrlResult handles POST /v1/vonras/call-sessions/:callId/ctrl-result.
-// Updates mediaResources (tAccess.endpoint → remote_addr) and optional callbackUrl.
+// Updates mediaResources and per-termination callbackUrl for both tcore and taccess sessions.
 func (s *Server) ctrlResult(c *gin.Context) {
 	var req CtrlResultRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -138,49 +200,58 @@ func (s *Server) ctrlResult(c *gin.Context) {
 	}
 	id := c.Param("callId")
 
-	patch := session.SessionPatch{
-		CallbackURL: req.CallbackURL,
-	}
 	if req.MediaResources != nil {
-		patch.MediaResources = &pipeline.MediaResources{
-			TCore: pipeline.MediaResource{
-				ContextID:     req.MediaResources.TCore.ContextID,
-				TerminationID: req.MediaResources.TCore.TerminationID,
-				Endpoint:      req.MediaResources.TCore.Endpoint,
-			},
-			TAccess: pipeline.MediaResource{
-				ContextID:     req.MediaResources.TAccess.ContextID,
-				TerminationID: req.MediaResources.TAccess.TerminationID,
-				Endpoint:      req.MediaResources.TAccess.Endpoint,
+		tcorePatch := session.SessionPatch{
+			CallbackURL: req.MediaResources.TCore.CallbackURL,
+			MediaResources: &pipeline.MediaResources{
+				TCore: &pipeline.MediaResource{
+					ContextID:     req.MediaResources.TCore.ContextID,
+					TerminationID: req.MediaResources.TCore.Termination.TerminationID,
+				},
 			},
 		}
-		patch.RemoteAddr = req.MediaResources.TAccess.Endpoint
-	}
-
-	sess, err := s.sessionMgr.Update(id, patch)
-	if err != nil {
-		if errors.Is(err, session.ErrNotFound) {
-			c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		if _, err := s.sessionMgr.Update(id+"-tcore", tcorePatch); err == nil {
+			if cb := s.coord.UpdateCallbackSink(id+"-tcore", req.MediaResources.TCore.CallbackURL); cb != nil {
+				s.RegisterCallbackSink(cb)
+			}
 		}
-		return
-	}
 
-	if req.CallbackURL != "" {
-		if cu, ok := s.coord.(CallbackSinkUpdater); ok {
-			if cbSink := cu.UpdateCallbackSink(id, req.CallbackURL); cbSink != nil {
-				s.RegisterCallbackSink(cbSink)
+		taccessPatch := session.SessionPatch{
+			CallbackURL: req.MediaResources.TAccess.CallbackURL,
+			MediaResources: &pipeline.MediaResources{
+				TAccess: &pipeline.MediaResource{
+					ContextID:     req.MediaResources.TAccess.ContextID,
+					TerminationID: req.MediaResources.TAccess.Termination.TerminationID,
+				},
+			},
+		}
+		if _, err := s.sessionMgr.Update(id+"-taccess", taccessPatch); err == nil {
+			if cb := s.coord.UpdateCallbackSink(id+"-taccess", req.MediaResources.TAccess.CallbackURL); cb != nil {
+				s.RegisterCallbackSink(cb)
 			}
 		}
 	}
 
-	c.JSON(http.StatusOK, sessionToResponse(sess))
+	sess, ok := s.sessionMgr.Get(id + "-taccess")
+	if !ok {
+		sess, ok = s.sessionMgr.Get(id + "-tcore")
+	}
+	if !ok {
+		c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
+		return
+	}
+	resp := sessionToResponse(sess)
+	resp.SessionID = id
+	c.JSON(http.StatusOK, resp)
 }
 
 // deleteCallSession handles DELETE /v1/vonras/call-sessions/:callId.
+// Closes both {callId}-tcore and {callId}-taccess sessions.
 func (s *Server) deleteCallSession(c *gin.Context) {
-	if !s.sessionMgr.Close(c.Param("callId")) {
+	callID := c.Param("callId")
+	closedCore := s.sessionMgr.Close(callID + "-tcore")
+	closedAccess := s.sessionMgr.Close(callID + "-taccess")
+	if !closedCore && !closedAccess {
 		c.JSON(http.StatusNotFound, ErrorResponse{Error: "session not found"})
 		return
 	}

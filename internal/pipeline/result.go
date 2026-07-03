@@ -2,15 +2,16 @@ package pipeline
 
 // MediaResource identifies an H.248/MEGACO media termination.
 type MediaResource struct {
-	ContextID     string `json:"contextId"`
-	TerminationID string `json:"terminationId"`
-	Endpoint      string `json:"endpoint"`
+	ContextID     string `json:"contextId,omitempty"`
+	TerminationID string `json:"terminationId,omitempty"`
 }
 
 // MediaResources holds the core-side and access-side H.248 terminations for a session.
+// Each session only populates one side (TCore or TAccess); omitempty ensures the absent
+// side does not serialize as {"contextId":"","terminationId":""} in the callback payload.
 type MediaResources struct {
-	TCore   MediaResource `json:"tCore"`
-	TAccess MediaResource `json:"tAccess"`
+	TCore   *MediaResource `json:"tCore,omitempty"`
+	TAccess *MediaResource `json:"tAccess,omitempty"`
 }
 
 // RecognitionResult là transcript/kết quả trả về từ AI Worker.

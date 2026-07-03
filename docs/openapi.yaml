@@ -58,7 +58,7 @@ paths:
               begin:
                 summary: BEGIN event
                 value:
-                  callIdentifier: "p2uc31@[FC00:0DB8::]"
+                  callId: "p2uc31@[FC00:0DB8::]"
                   event: "BEGIN"
                   direction: "MT"
                   role: "terminator"
@@ -68,7 +68,7 @@ paths:
               answer:
                 summary: ANSWER event — speech_to_text
                 value:
-                  callIdentifier: "p2uc31@[FC00:0DB8::]"
+                  callId: "p2uc31@[FC00:0DB8::]"
                   event: "ANSWER"
                   selectedService: "speech_to_text"
                   direction: "MT"
@@ -105,9 +105,13 @@ paths:
                 created_at: "2026-06-27T08:00:00Z"
                 gateway_id: "gw-node-1"
                 rtp_ip: "192.168.100.10"
-                rtp_port: 40000
-                local_non_dc_media:
+                tcore_rtp_port: 40000
+                taccess_rtp_port: 40001
+                tcore_local_non_dc_media:
                   sdpmLine: "audio 40000 RTP/AVP 0"
+                  sdpaLines: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+                taccess_local_non_dc_media:
+                  sdpmLine: "audio 40001 RTP/AVP 0"
                   sdpaLines: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -126,11 +130,12 @@ paths:
       summary: Nhận kết quả media negotiation từ DCSF
       description: |
         DCSF forward `ctrl_result` từ IMS-AS sau khi SDP negotiation hoàn tất.
-        Gateway cập nhật `remote_addr` (từ `tAccess.endpoint`) cho RTP routing
-        và optional `callbackUrl` cho ASR result delivery.
+        Gateway cập nhật `contextId`, `terminationId` cho mỗi termination và
+        thiết lập `callbackUrl` per-termination cho ASR result delivery.
 
-        **DCSF extension:** `callbackUrl` không có trong 3GPP spec — được thêm để
-        gateway biết gửi ASR results đến đâu.
+        **Cấu trúc `mediaResources`** theo 3GPP MRM (TS29.176): mỗi termination
+        có `contextId`, `termination.{terminationId, medias}` và `callbackUrl`
+        (DCSF extension — không có trong 3GPP spec).
       operationId: ctrlResult
       parameters:
         - $ref: "#/components/parameters/callId"
@@ -141,17 +146,20 @@ paths:
             schema:
               $ref: "#/components/schemas/CtrlResultRequest"
             example:
-              callIdentifier: "p2uc31@[FC00:0DB8::]"
+              callId: "p2uc31@[FC00:0DB8::]"
               mediaResources:
                 tCore:
                   contextId: "ctx-core-001"
-                  terminationId: "term-core-001"
-                  endpoint: "10.1.1.1:5060"
+                  termination:
+                    terminationId: "term-core-001"
+                    medias: []
+                  callbackUrl: "http://mf-callback.internal:8090/tcore"
                 tAccess:
                   contextId: "ctx-access-001"
-                  terminationId: "term-access-001"
-                  endpoint: "192.168.1.10:5100"
-              callbackUrl: "http://mf-host:9090/asr-results"
+                  termination:
+                    terminationId: "term-access-001"
+                    medias: []
+                  callbackUrl: "http://mf-callback.internal:8090/taccess"
       responses:
         "200":
           description: Session cập nhật thành công
@@ -412,7 +420,7 @@ components:
       name: callId
       in: path
       required: true
-      description: Call session ID — callIdentifier từ DCSF (SIP URI hoặc hash)
+      description: Call session ID — callId từ DCSF (SIP URI hoặc hash)
       schema:
         type: string
       example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
@@ -455,31 +463,51 @@ components:
 
     # ── Shared ──────────────────────────────────────────────────────────────
 
-    MediaResource:
+    TerminationInfo:
       type: object
-      description: H.248/MEGACO media termination.
+      description: |
+        H.248 termination theo 3GPP TS29.176 `TerminationInfo` schema.
+        Gateway forward nguyên vẹn — không parse nội dung.
+      properties:
+        terminationId:
+          type: string
+          description: H.248 termination ID
+          example: "term-access-001"
+        medias:
+          type: array
+          description: |
+            Mảng `MediaInfo` theo 3GPP TS29.176 `MediaInfo` schema
+            (mediaId, mediaResourceType, localNonDcMedia, remoteNonDcMedia, ...).
+            Gateway nhận nhưng không parse — forward-compatible.
+          items:
+            $ref: "TS29176_Nmf_MRM.yaml#/components/schemas/MediaInfo"
+
+    MediaResourceInfo:
+      type: object
+      description: Một termination resource trong ctrl-result từ DCSF.
       properties:
         contextId:
           type: string
           description: H.248 context ID
           example: "ctx-001"
-        terminationId:
+        termination:
+          $ref: "#/components/schemas/TerminationInfo"
+        callbackUrl:
           type: string
-          description: H.248 termination ID
-          example: "term-access-001"
-        endpoint:
-          type: string
-          description: RTP endpoint "ip:port"
-          example: "192.168.1.10:5100"
+          format: uri
+          description: |
+            HTTP/2 endpoint nhận ASR results cho termination này (DCSF extension).
+            Gateway tạo `HTTPCallbackSink` khi field này không rỗng.
+          example: "http://mf-callback.internal:8090/taccess"
 
     MediaResources:
       type: object
       description: Cặp termination H.248 — core-side và access-side.
       properties:
         tCore:
-          $ref: "#/components/schemas/MediaResource"
+          $ref: "#/components/schemas/MediaResourceInfo"
         tAccess:
-          $ref: "#/components/schemas/MediaResource"
+          $ref: "#/components/schemas/MediaResourceInfo"
 
     EventLocation:
       type: object
@@ -499,10 +527,10 @@ components:
 
     SessionEvent:
       type: object
-      required: [callIdentifier, event]
+      required: [callId, event]
       description: Sự kiện phiên từ DCSF.
       properties:
-        callIdentifier:
+        callId:
           type: string
           description: SIP URI định danh cuộc gọi — dùng làm session ID
           example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
@@ -544,29 +572,17 @@ components:
 
     CtrlResultRequest:
       type: object
-      required: [callIdentifier]
+      required: [callId]
       description: |
         Ctrl result từ IMS-AS forwarded bởi DCSF sau SDP negotiation.
-        `callbackUrl` là DCSF extension — không có trong 3GPP spec.
+        `callbackUrl` per-termination là DCSF extension — không có trong 3GPP spec.
       properties:
-        callIdentifier:
+        callId:
           type: string
           description: SIP URI định danh cuộc gọi — phải khớp với session ID đã tạo
           example: "p2uc31@[FC00:0DB8::]"
-        actionResults:
-          type: array
-          description: Kết quả xử lý từ IMS-AS. Gateway không xử lý, chỉ forward-compatible.
-          items:
-            type: object
         mediaResources:
           $ref: "#/components/schemas/MediaResources"
-        callbackUrl:
-          type: string
-          format: uri
-          description: |
-            HTTP/2 endpoint nhận ASR results (DCSF extension).
-            `tAccess.endpoint` tự động được set làm `remote_addr` cho RTP routing.
-          example: "http://mf-host:9090/asr-results"
 
     OfferRequest:
       type: object
@@ -646,7 +662,7 @@ components:
       properties:
         session_id:
           type: string
-          description: Session ID (= callId = callIdentifier từ DCSF)
+          description: Session ID (= callId = callId từ DCSF)
           example: "p2uc31@[FC00:0DB8::]"
         status:
           type: string
@@ -684,15 +700,24 @@ components:
           type: string
           description: Public IP để gửi RTP vào (chỉ có trong ANSWER CREATE response)
           example: "192.168.100.10"
-        rtp_port:
+        tcore_rtp_port:
           type: integer
-          description: UDP port để gửi RTP vào (chỉ có trong ANSWER CREATE response)
+          description: UDP port tCore stream (chỉ có trong ANSWER CREATE response, khi port pool được cấu hình)
           example: 40000
-        local_non_dc_media:
+        taccess_rtp_port:
+          type: integer
+          description: UDP port tAccess stream (chỉ có trong ANSWER CREATE response, khi port pool được cấu hình)
+          example: 40001
+        tcore_local_non_dc_media:
           $ref: "#/components/schemas/NonDcMedia"
           description: |
-            SDP mô tả gateway RTP endpoint (chỉ có trong ANSWER CREATE response, raw_rtp với per-session port pool).
-            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts (3GPP TS29.176).
+            SDP mô tả gateway RTP endpoint cho tCore (chỉ có trong ANSWER CREATE response, raw_rtp với port pool).
+            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts cho tCore termination (3GPP TS29.176).
+        taccess_local_non_dc_media:
+          $ref: "#/components/schemas/NonDcMedia"
+          description: |
+            SDP mô tả gateway RTP endpoint cho tAccess (chỉ có trong ANSWER CREATE response, raw_rtp với port pool).
+            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts cho tAccess termination (3GPP TS29.176).
 
     NonDcMedia:
       type: object

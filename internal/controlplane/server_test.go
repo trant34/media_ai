@@ -37,6 +37,8 @@ func (f *fakeStarter) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 	return nil, nil
 }
 
+func (f *fakeStarter) UpdateCallbackSink(_, _ string) *result.HTTPCallbackSink { return nil }
+
 type noopDialer struct{}
 
 func (noopDialer) Dial(_ context.Context, _, _, _, _ string) (ai.StreamClient, error) {
@@ -114,7 +116,7 @@ func assertContentType(t *testing.T, w *httptest.ResponseRecorder) {
 // callId mặc định "call-sess-1" (khớp với notifyPath/sessionPath bên dưới).
 func validAnswerReq() SessionEvent {
 	return SessionEvent{
-		CallIdentifier:  "call-sess-1",
+		CallID:  "call-sess-1",
 		Event:           "ANSWER",
 		SelectedService: "speech_to_text",
 	}
@@ -138,7 +140,7 @@ func sessionPath(callId string) string {
 
 func TestNotifyEvent_Begin_OK(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	req := SessionEvent{CallIdentifier: testCallID, Event: "BEGIN"}
+	req := SessionEvent{CallID: testCallID, Event: "BEGIN"}
 	w := postJSON(t, s, notifyPath(testCallID), req)
 	assertStatus(t, w, http.StatusOK)
 }
@@ -172,8 +174,16 @@ func TestNotifyEvent_Answer_Created(t *testing.T) {
 	if resp.Task != "speech_to_text" {
 		t.Errorf("task: want speech_to_text, got %s", resp.Task)
 	}
-	if len(coord.started) == 0 || coord.started[0] != testCallID {
-		t.Errorf("coordinator not called with %s", testCallID)
+	// 1 call → 2 sessions: tcore + taccess
+	wantStarted := []string{testCallID + "-tcore", testCallID + "-taccess"}
+	if len(coord.started) != 2 {
+		t.Errorf("coordinator started %d sessions, want 2; got %v", len(coord.started), coord.started)
+	} else {
+		for i, want := range wantStarted {
+			if coord.started[i] != want {
+				t.Errorf("coord.started[%d]: want %s, got %s", i, want, coord.started[i])
+			}
+		}
 	}
 }
 
@@ -183,7 +193,7 @@ func TestNotifyEvent_Answer_UnknownService(t *testing.T) {
 	s := newTestServer(t, coord)
 
 	req := SessionEvent{
-		CallIdentifier:  testCallID,
+		CallID:  testCallID,
 		Event:           "ANSWER",
 		SelectedService: "fun_calling",
 	}
@@ -223,8 +233,9 @@ func TestNotifyEvent_Answer_CoordFail_RollsBack(t *testing.T) {
 }
 
 func TestNotifyEvent_Answer_MaxSessions(t *testing.T) {
+	// 1 call needs 2 session slots (tcore + taccess). MaxSessions=2 → 1st call OK, 2nd fails.
 	mgr := session.NewManager(session.ManagerConfig{
-		MaxSessions:     1,
+		MaxSessions:     2,
 		PacketQueueSize: 8,
 		AudioQueueSize:  8,
 		ResultQueueSize: 8,
@@ -236,10 +247,12 @@ func TestNotifyEvent_Answer_MaxSessions(t *testing.T) {
 	disp := result.NewDispatcher(result.DefaultConfig())
 	s := NewServer(DefaultServerConfig(), mgr, &fakeStarter{}, pool, aiMgr, disp)
 
+	// First call uses both slots.
 	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
+	// Second call cannot allocate 2 more sessions.
 	req2 := SessionEvent{
-		CallIdentifier:  "call-sess-2",
+		CallID:  "call-sess-2",
 		Event:           "ANSWER",
 		SelectedService: "speech_to_text",
 	}
@@ -249,7 +262,7 @@ func TestNotifyEvent_Answer_MaxSessions(t *testing.T) {
 
 func TestNotifyEvent_UnknownEvent(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	req := SessionEvent{CallIdentifier: testCallID, Event: "RELEASE"}
+	req := SessionEvent{CallID: testCallID, Event: "RELEASE"}
 	w := postJSON(t, s, notifyPath(testCallID), req)
 	assertStatus(t, w, http.StatusBadRequest)
 }
@@ -266,6 +279,7 @@ func TestGetCallSession_Found(t *testing.T) {
 
 	var resp SessionResponse
 	decodeJSON(t, w, &resp)
+	// session_id in response is always the callID, not the internal tcore/taccess ID
 	if resp.SessionID != testCallID {
 		t.Errorf("session_id: want %s, got %s", testCallID, resp.SessionID)
 	}
@@ -312,19 +326,34 @@ func TestCtrlResult_OK(t *testing.T) {
 	postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
 	req := CtrlResultRequest{
-		CallIdentifier: testCallID,
+		CallID: testCallID,
 		MediaResources: &MediaResources{
-			TAccess: MediaResource{Endpoint: "10.0.0.1:20000"},
+			TCore: MediaResourceInfo{
+				ContextID:   "ctx-1",
+				Termination: TerminationInfo{TerminationID: "term-1"},
+				CallbackURL: "http://callback.example.com/tcore",
+			},
+			TAccess: MediaResourceInfo{
+				ContextID:   "ctx-2",
+				Termination: TerminationInfo{TerminationID: "term-2"},
+				CallbackURL: "http://callback.example.com/taccess",
+			},
 		},
 	}
 	w := postJSON(t, s, ctrlResultPath(testCallID), req)
 	assertStatus(t, w, http.StatusOK)
 	assertContentType(t, w)
+
+	var resp SessionResponse
+	decodeJSON(t, w, &resp)
+	if resp.SessionID != testCallID {
+		t.Errorf("session_id: want %s, got %s", testCallID, resp.SessionID)
+	}
 }
 
 func TestCtrlResult_NotFound(t *testing.T) {
 	s := newTestServer(t, &fakeStarter{})
-	req := CtrlResultRequest{CallIdentifier: "nope"}
+	req := CtrlResultRequest{CallID: "nope"}
 	w := postJSON(t, s, ctrlResultPath("nope"), req)
 	assertStatus(t, w, http.StatusNotFound)
 }
@@ -403,8 +432,9 @@ func TestStats_OK(t *testing.T) {
 
 	var resp StatsResponse
 	decodeJSON(t, w, &resp)
-	if resp.Sessions != 1 {
-		t.Errorf("sessions: want 1, got %d", resp.Sessions)
+	// 1 call creates 2 sessions: tcore + taccess
+	if resp.Sessions != 2 {
+		t.Errorf("sessions: want 2 (1 call = 2 sessions), got %d", resp.Sessions)
 	}
 }
 
