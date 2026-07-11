@@ -250,12 +250,35 @@ Media Control Plane là bộ điều phối session và tài nguyên. Module nà
   "role": "terminator",
   "bearerCapability": "VIDEO",
   "calling": "86156****5398",
-  "called": "86156****5399"
+  "called": "86156****5399",
+  "callbackUrl": "http://dcsf.ims.internal:9090/v1/dcsf/call-sessions/p2uc31%40%5BFC00%3A0DB8%3A%3A%5D/call-control"
 }
 ```
 
 > Codec được suy từ `selectedService`: `speech_to_text` / `realtime_translation` → PCMU/8000.  
-> `ssrc` và `remote_addr` không có trong ANSWER body — dùng per-session port pool, remote_addr được set sau qua ctrl-result.
+> `ssrc` và `remote_addr` không có trong ANSWER body — dùng per-session port pool, remote_addr được set sau qua ctrl-result.  
+> `callbackUrl`: URL DCSF cấp để DCAS POST CALL_CTRL lại — xem §5.1 "Outbound — CALL_CTRL đến DCSF".
+
+### Outbound — CALL_CTRL đến DCSF
+
+Sau khi tạo session thành công, DCAS POST CALL_CTRL đến `callbackUrl` nhận từ ANSWER:
+
+```http
+POST {callbackUrl từ ANSWER}
+Content-Type: application/json
+```
+
+```json
+{
+  "callId": "p2uc31@[FC00:0DB8::]",
+  "service_name": "speech_to_text",
+  "actions": "duplicate",
+  "callbackUrl": "http://10.10.1.5:8443/v1/vonras/call-sessions/p2uc31%40%5BFC00%3A0DB8%3A%3A%5D/ctrl-result"
+}
+```
+
+> `callbackUrl` trong body CALL_CTRL là địa chỉ DCAS (cấu hình `server.public_url`) kèm path ctrl-result — để DCSF biết gửi kết quả SDP negotiation về đâu.  
+> Timeout cấu hình bởi `dcsf.call_control_timeout_ms` (mặc định 30s — DCSF block chờ CALL_RESULT từ IMS-AS trước khi respond).
 
 ### Input — ctrl-result
 
@@ -1721,6 +1744,8 @@ gateway:
 
 server:
   http_addr: ":8080"
+  public_url: ""             # địa chỉ public của DCAS, dùng làm callbackUrl trong CALL_CTRL gửi DCSF
+                             # ví dụ: "http://10.0.0.1:8080" hoặc "https://dcas.internal:8443"
   cert_file: ""              # để trống → h2c cleartext
   key_file: ""
   metrics_addr: ""           # "" = phục vụ /metrics trên cùng http_addr
@@ -1789,6 +1814,10 @@ callback:
   retry_backoff_ms: 200
   read_idle_timeout_ms: 30000  # gửi H/2 PING sau N ms idle; 0 = tắt
   ping_timeout_ms: 15000       # đóng conn nếu không nhận PONG trong N ms
+
+dcsf:
+  hosts: []                    # pre-warm H/2 pool khi khởi động; ví dụ: [{host: "dcsf.internal", port: 9090}]
+  call_control_timeout_ms: 30000  # timeout POST CALL_CTRL (ms); cần lớn vì DCSF block chờ CALL_RESULT từ IMS-AS
 
 log:
   level: "info"    # debug | info | warn | error
@@ -1939,7 +1968,8 @@ Request:
     "tac": "000002"
   },
   "calling": "86156****5398",
-  "called": "86156****5399"
+  "called": "86156****5399",
+  "callbackUrl": "http://dcsf.ims.internal:9090/v1/dcsf/call-sessions/p2uc31%40%5BFC00%3A0DB8%3A%3A%5D/call-control"
 }
 ```
 

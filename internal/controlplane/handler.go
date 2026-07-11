@@ -1,9 +1,11 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"runtime"
 	"strings"
@@ -147,6 +149,23 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 	}
 	if cbSink2 != nil {
 		s.RegisterCallbackSink(cbSink2)
+	}
+
+	if event.CallbackURL != "" {
+		timeout := s.cfg.DCSFCallControlTimeout
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
+		cctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+		defer cancel()
+		ctrlResultURL := s.cfg.PublicURL + "/v1/vonras/call-sessions/" + callID + "/ctrl-result"
+		if err := s.dcsfPool.SendCallControl(cctx, event.CallbackURL, callID, event.SelectedService, ctrlResultURL); err != nil {
+			slog.Warn("call-control failed, releasing session", "call_id", callID, "err", err)
+			s.sessionMgr.Close(tcoreID)
+			s.sessionMgr.Close(taccessID)
+			c.JSON(http.StatusBadGateway, ErrorResponse{Error: "call-control: " + err.Error()})
+			return
+		}
 	}
 
 	resp := sessionToResponse(sessTCore)

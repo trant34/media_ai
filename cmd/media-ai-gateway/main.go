@@ -172,9 +172,19 @@ func main() {
 	rtpRouter  := rawrtp.NewManagerRouter(sessMgr)
 	rtpIngress := rawrtp.NewIngress(cfg.ToRTPIngressConfig(), rtpRouter)
 
+	// DCSF outbound pool — pre-warm H/2 connection per configured host.
+	dcsfPool := controlplane.NewDCSFPool(cfg.ToDCSFAddrs())
+	if len(cfg.DCSF.Hosts) > 0 {
+		preCtx, preCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		dcsfPool.Preconnect(preCtx)
+		preCancel()
+		slog.Info("DCSF pool initialized", "hosts", len(cfg.DCSF.Hosts))
+	}
+
 	apiSrv := controlplane.NewServer(cfg.ToControlPlaneServerConfig(), sessMgr, coord, pool, aiMgr, disp)
 	apiSrv.SetRTPIngress(rtpIngress)
 	apiSrv.SetCallbackClient(callbackClient)
+	apiSrv.SetDCSFPool(dcsfPool)
 	// Wire WorkerRegistry và gRPC pool chỉ khi dùng RoutingDialer thực.
 	// NullDialer (dev mode): bỏ qua để admission không block vì "no_ai_worker".
 	if cfg.AI.GRPCTarget != "" {

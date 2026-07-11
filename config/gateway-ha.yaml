@@ -31,6 +31,7 @@ gateway:
 # ── Control plane ─────────────────────────────────────────────────────────────
 server:
   http_addr: ":8080"
+  public_url: "http://10.10.0.11:8080"  # IP của node này — DCSF gửi ctrl-result về đây; thay đổi theo node
   cert_file: ""                 # h2c — TLS offload tại ingress/load balancer
   key_file:  ""
   metrics_addr: ":9090"
@@ -115,6 +116,15 @@ callback:
   retry_backoff_ms:      200
   read_idle_timeout_ms:  30000  # gửi H/2 PING sau 30s idle để giữ kết nối qua NAT
   ping_timeout_ms:       15000  # đóng connection nếu không nhận PONG trong 15s
+
+# ── DCSF outbound (CALL_CTRL) ─────────────────────────────────────────────────
+dcsf:
+  hosts:
+    - host: "dcsf-1.internal"
+      port: 9090
+    - host: "dcsf-2.internal"
+      port: 9090
+  call_control_timeout_ms: 30000
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log:

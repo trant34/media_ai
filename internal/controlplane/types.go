@@ -29,7 +29,7 @@ type MediaResources struct {
 // Body gửi thẳng các field — không bọc trong wrapper.
 // SessionEvent mô tả sự kiện phiên từ DCSF.
 type SessionEvent struct {
-	CallID   string         `json:"callId"`
+	CallID           string         `json:"callId"`
 	Event            string         `json:"event"`                      // "BEGIN" | "ANSWER"
 	SelectedService  string         `json:"selectedService,omitempty"`
 	Direction        string         `json:"direction,omitempty"`
@@ -38,6 +38,7 @@ type SessionEvent struct {
 	Location         *EventLocation `json:"location,omitempty"`
 	Calling          string         `json:"calling,omitempty"`
 	Called           string         `json:"called,omitempty"`
+	CallbackURL      string         `json:"callbackUrl,omitempty"` // ANSWER only: URL DCAS dùng để POST CALL_CTRL về DCSF
 }
 
 // EventLocation mô tả vị trí địa lý của UE trong sự kiện DCSF.

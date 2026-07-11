@@ -69,6 +69,17 @@ type ServerConfig struct {
 	// 0 → sử dụng mặc định 30s.
 	RegistryTTL time.Duration
 
+	// DCSFCallControlTimeout là timeout cho POST CALL_CTRL đến DCSF sau khi xử lý ANSWER.
+	// 0 → dùng mặc định 30s. Cần đủ lớn vì duplicate action khiến DCSF block chờ CALL_RESULT từ IMS-AS.
+	DCSFCallControlTimeout time.Duration
+
+	// PublicURL là địa chỉ public của DCAS (ví dụ: "http://10.0.0.1:8080").
+	// Dùng để xây callbackUrl trong CALL_CTRL body để DCSF biết gửi ctrl-result về đâu.
+	PublicURL string
+
+	// WebRTCEnabled bật/tắt WebRTC ingress. false → POST /v1/webrtc/offer trả 404.
+	WebRTCEnabled bool
+
 	// WebRTC configures the WebRTC ingress (Pion PeerConnection, ICE servers, NAT).
 	// Used to handle POST /v1/webrtc/offer.
 	WebRTC wrtc.Config
@@ -107,6 +118,7 @@ type Server struct {
 	// Optional connection sources — set after construction via setter methods.
 	grpcPool       *ai.SharedConnPool
 	callbackClient *result.CallbackHTTPClient
+	dcsfPool       *DCSFPool
 }
 
 // SetRTPIngress wires shared Raw RTP ingress cho metric collection tại /metrics.
@@ -125,6 +137,10 @@ func (s *Server) SetGRPCPool(pool *ai.SharedConnPool) { s.grpcPool = pool }
 
 // SetCallbackClient wires CallbackHTTPClient để expose trạng thái H/2 tại GET /v1/connections.
 func (s *Server) SetCallbackClient(c *result.CallbackHTTPClient) { s.callbackClient = c }
+
+// SetDCSFPool wires DCSFPool để gửi CALL_CTRL đến DCSF sau khi xử lý ANSWER.
+// Nếu không gọi, handler dùng dcsfFallbackClient (không pre-warmed).
+func (s *Server) SetDCSFPool(pool *DCSFPool) { s.dcsfPool = pool }
 
 // SetWorkerRegistry wires AI WorkerRegistry vào AdmissionController để kiểm tra reachability.
 // Readiness sẽ fail (reason: "no_ai_worker") khi không có fresh worker nào trong registry.
@@ -174,14 +190,6 @@ func NewServer(
 	registry := NewGatewayRegistry(ttl)
 	selector := NewGatewaySelector(registry)
 
-	webrtcAPI, err := wrtc.NewAPI(cfg.WebRTC)
-	if err != nil {
-		panic("controlplane: WebRTC API init failed: " + err.Error())
-	}
-
-	webrtcHandler := wrtc.NewHandler(webrtcAPI, cfg.WebRTC, sessionMgr)
-	webrtcHandler.SetDispatcher(dispatcher)
-
 	s := &Server{
 		cfg:        cfg,
 		sessionMgr: sessionMgr,
@@ -193,7 +201,16 @@ func NewServer(
 		admission:  NewAdmissionController(sessionMgr, pool, aiMgr, portAlloc),
 		registry:   registry,
 		selector:   selector,
-		webrtc:     webrtcHandler,
+	}
+
+	if cfg.WebRTCEnabled {
+		webrtcAPI, err := wrtc.NewAPI(cfg.WebRTC)
+		if err != nil {
+			panic("controlplane: WebRTC API init failed: " + err.Error())
+		}
+		webrtcHandler := wrtc.NewHandler(webrtcAPI, cfg.WebRTC, sessionMgr)
+		webrtcHandler.SetDispatcher(dispatcher)
+		s.webrtc = webrtcHandler
 	}
 
 	// Auto-register self so this node appears in the registry immediately.
@@ -236,7 +253,9 @@ func (s *Server) routes() http.Handler {
 		vonras.DELETE("/:callId", s.deleteCallSession)
 		vonras.GET("/:callId", s.getCallSession)
 
-		v1.POST("/webrtc/offer", gin.WrapF(s.webrtc.ServeOffer))
+		if s.webrtc != nil {
+			v1.POST("/webrtc/offer", gin.WrapF(s.webrtc.ServeOffer))
+		}
 		v1.PUT("/gateways/:id/heartbeat", s.heartbeat)
 		v1.GET("/stats", s.stats)
 		v1.GET("/connections", s.connections)

@@ -38,7 +38,25 @@ type GatewayConfig struct {
 	AI       AISection       `yaml:"ai"`
 	Result   ResultSection   `yaml:"result"`
 	Callback CallbackSection `yaml:"callback"`
+	DCSF     DCSFSection     `yaml:"dcsf"`
 	Log      LogSection      `yaml:"log"`
+}
+
+// DCSFHostConfig mô tả một DCSF endpoint cần pre-warm H/2 connection.
+type DCSFHostConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+}
+
+// DCSFSection cấu hình outbound HTTP/2 pool đến DCSF (CALL_CTRL).
+type DCSFSection struct {
+	// Hosts là danh sách DCSF endpoint cần tạo pool và pre-warm khi khởi động.
+	// callbackUrl trong ANSWER event xác định host:port → chọn pool tương ứng.
+	Hosts []DCSFHostConfig `yaml:"hosts"`
+
+	// CallControlTimeoutMs là timeout cho POST /call-control đến DCSF.
+	// Cần đủ lớn vì duplicate action khiến DCSF block chờ CALL_RESULT từ IMS-AS.
+	CallControlTimeoutMs int `yaml:"call_control_timeout_ms"`
 }
 
 // GatewaySection định danh node và bật/tắt ingress protocol.
@@ -52,9 +70,10 @@ type GatewaySection struct {
 // ServerSection cấu hình HTTP/2 control plane.
 type ServerSection struct {
 	HTTPAddr           string `yaml:"http_addr"`
+	PublicURL          string `yaml:"public_url"`          // địa chỉ public của DCAS, dùng trong callbackUrl gửi DCSF
 	CertFile           string `yaml:"cert_file"`
 	KeyFile            string `yaml:"key_file"`
-	MetricsAddr        string `yaml:"metrics_addr"`       // "" = serve /metrics tại HTTPAddr
+	MetricsAddr        string `yaml:"metrics_addr"`        // "" = serve /metrics tại HTTPAddr
 	ShutdownTimeoutSec int    `yaml:"shutdown_timeout_sec"`
 }
 
@@ -217,6 +236,9 @@ func Default() GatewayConfig {
 			ReadIdleTimeoutMs: 30000,
 			PingTimeoutMs:     15000,
 		},
+		DCSF: DCSFSection{
+			CallControlTimeoutMs: 30000,
+		},
 		Log: LogSection{
 			Level:              "info",
 			Format:             "json",
@@ -319,17 +341,21 @@ func (c GatewayConfig) ToCallbackHTTPClient() *result.CallbackHTTPClient {
 // ToControlPlaneServerConfig chuyển đổi sang controlplane.ServerConfig.
 func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 	return controlplane.ServerConfig{
-		Addr:         c.Server.HTTPAddr,
-		CertFile:     c.Server.CertFile,
-		KeyFile:      c.Server.KeyFile,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
-		GatewayID:    c.Gateway.ID,
-		RTPPublicIP:  c.RTP.PublicIP,
-		RTPBindIP:    c.RTP.BindIP,
-		RTPPortStart: c.RTP.PortStart,
-		RTPPortEnd:   c.RTP.PortEnd,
+		Addr:                   c.Server.HTTPAddr,
+		PublicURL:              c.Server.PublicURL,
+		CertFile:               c.Server.CertFile,
+		KeyFile:                c.Server.KeyFile,
+		ReadTimeout:            10 * time.Second,
+		WriteTimeout:           10 * time.Second,
+		IdleTimeout:            60 * time.Second,
+		GatewayID:              c.Gateway.ID,
+		RTPPublicIP:            c.RTP.PublicIP,
+		RTPBindIP:              c.RTP.BindIP,
+		RTPPortStart:           c.RTP.PortStart,
+		RTPPortEnd:             c.RTP.PortEnd,
+		DCSFCallControlTimeout: time.Duration(c.DCSF.CallControlTimeoutMs) * time.Millisecond,
+		WebRTCEnabled:          c.Gateway.WebRTCEnabled,
+		WebRTC:                 c.ToWebRTCConfig(),
 	}
 }
 
@@ -340,6 +366,16 @@ func (c GatewayConfig) ToRTPIngressConfig() rawrtp.IngressConfig {
 		MaxPacket:       1500,
 		ReadBufferBytes: c.RTP.SocketReadBuffer,
 	}
+}
+
+// ToDCSFAddrs trả về danh sách "host:port" từ cấu hình DCSF hosts.
+// Dùng để tạo DCSFPool trong controlplane.
+func (c GatewayConfig) ToDCSFAddrs() []string {
+	addrs := make([]string, 0, len(c.DCSF.Hosts))
+	for _, h := range c.DCSF.Hosts {
+		addrs = append(addrs, fmt.Sprintf("%s:%d", h.Host, h.Port))
+	}
+	return addrs
 }
 
 // ToWebRTCConfig chuyển đổi sang webrtcingress.Config.

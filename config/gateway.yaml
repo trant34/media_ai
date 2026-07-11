@@ -12,6 +12,8 @@ gateway:
 # ── HTTP/2 control plane ───────────────────────────────────────────────────────
 server:
   http_addr: ":8080"         # địa chỉ lắng nghe control plane (h2c hoặc TLS+h2)
+  public_url: ""             # địa chỉ public của DCAS, dùng làm callbackUrl trong CALL_CTRL gửi DCSF
+                             # ví dụ: "http://10.0.0.1:8080" hoặc "https://dcas.internal:8443"
   cert_file: ""              # đường dẫn TLS cert PEM; để trống → dùng h2c cleartext
   key_file:  ""              # đường dẫn TLS key PEM
   metrics_addr: ""           # nếu khác http_addr → chạy server metrics riêng, vd ":9090"
@@ -106,6 +108,13 @@ callback:
   retry_backoff_ms: 200        # thời gian chờ giữa các lần retry callback (ms)
   read_idle_timeout_ms: 30000  # gửi H/2 PING sau N ms idle để giữ kết nối; 0 = không ping
   ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong N ms
+
+# ── DCSF outbound (CALL_CTRL) ──────────────────────────────────────────────────
+# hosts: danh sách DCSF node để tạo H/2 pool và pre-warm khi khởi động.
+# Host trong callbackUrl từ ANSWER sẽ tự động tạo pool nếu chưa có trong danh sách.
+dcsf:
+  hosts: []                      # ví dụ: [{host: "dcsf.internal", port: 9090}]
+  call_control_timeout_ms: 30000 # timeout POST CALL_CTRL (ms); cần lớn vì DCSF block chờ CALL_RESULT
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 log:

@@ -32,9 +32,10 @@ gateway:
 # ── Control plane (TLS, expose cho SBC management) ───────────────────────────
 server:
   http_addr: ":8443"
-  cert_file: "/etc/tls/gateway.crt"   # cert signed bởi internal CA
+  public_url: "https://10.10.1.5:8443"  # địa chỉ public của DCAS nhìn từ DCSF — để DCSF gửi ctrl-result về đây
+  cert_file: "/etc/tls/gateway.crt"     # cert signed bởi internal CA
   key_file:  "/etc/tls/gateway.key"
-  metrics_addr: ":9090"               # Prometheus scrape trên port riêng
+  metrics_addr: ":9090"                 # Prometheus scrape trên port riêng
   shutdown_timeout_sec: 15
 
 # ── Raw RTP — per-session port pool ──────────────────────────────────────────
@@ -115,6 +116,13 @@ callback:
   retry_backoff_ms:  500    # backoff dài hơn — tránh storm khi AS bận
   read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle để giữ kết nối
   ping_timeout_ms:  15000   # đóng connection nếu không nhận PONG trong 15s
+
+# ── DCSF outbound (CALL_CTRL) ─────────────────────────────────────────────────
+dcsf:
+  hosts:
+    - host: "dcsf.ims.internal"
+      port: 9090
+  call_control_timeout_ms: 30000
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log:

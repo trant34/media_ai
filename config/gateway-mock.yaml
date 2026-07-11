@@ -22,6 +22,7 @@ gateway:
 
 server:
   http_addr: ":8080"
+  public_url: "http://127.0.0.1:8080"  # địa chỉ DCAS để DCSF gửi ctrl-result về; đổi thành IP lab nếu DCSF ở máy khác
   # metrics_addr để trống → /metrics phục vụ trên cùng port 8080
   # lab-rtp-test.sh mặc định METRICS_PORT=GW_PORT nên không cần thay đổi
   shutdown_timeout_sec: 5
@@ -89,6 +90,10 @@ callback:
   retry_backoff_ms: 100
   read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle
   ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong 15s
+
+dcsf:
+  hosts: []                      # để trống khi test; pool sẽ tạo động từ callbackUrl trong ANSWER
+  call_control_timeout_ms: 30000
 
 log:
   level: "info"   # đổi "debug" để xem chi tiết từng bước pipeline
