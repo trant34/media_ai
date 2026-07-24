@@ -72,8 +72,6 @@ func (m *Monitor) emit() {
 			"ai_send_errors", st.TotalSendErrors,
 			"ai_recv_errors", st.TotalRecvErrors,
 			"ai_retries", st.TotalRetries,
-			"ai_latency_last_ms", st.LatencyLast,
-			"ai_latency_avg_ms", st.AvgLatencyMs(),
 			"ai_first_result_avg_ms", st.AvgFirstResultMs(),
 		)
 	}

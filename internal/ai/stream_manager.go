@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,23 +53,9 @@ type ManagerStats struct {
 	TotalRecvErrors uint64
 	TotalRetries    uint64
 
-	// Latency (end_ms-to-recv, ms). Count=0 nếu AI không set end_ms.
-	LatencyCount uint64
-	LatencySum   int64
-	LatencyLast  int64 // latency của result gần nhất trong toàn bộ manager
-
-	// FirstResultMs: median của first-result latency từ tất cả stream đã đóng + active.
-	// Dùng LatencyFirstCount và LatencyFirstSum để tính avg.
+	// FirstResultMs: first-result latency (stream open → first result) từ tất cả stream đã đóng + active.
 	LatencyFirstCount uint64
 	LatencyFirstSum   int64
-}
-
-// AvgLatencyMs trả về latency trung bình (ms); 0 nếu chưa có data.
-func (s ManagerStats) AvgLatencyMs() int64 {
-	if s.LatencyCount == 0 {
-		return 0
-	}
-	return s.LatencySum / int64(s.LatencyCount)
 }
 
 // AvgFirstResultMs trả về first-result latency trung bình (ms); 0 nếu chưa có data.
@@ -88,15 +75,11 @@ type Manager struct {
 	mu      sync.RWMutex
 	streams map[string]*Stream // sessionID → Stream
 
-	totalSendErrors atomic.Uint64
-	totalRecvErrors atomic.Uint64
-	totalRetries    atomic.Uint64
-
-	totalLatencyCount      atomic.Uint64
-	totalLatencySum        atomic.Int64
-	totalLatencyLast       atomic.Int64
-	totalFirstResultCount  atomic.Uint64
-	totalFirstResultSum    atomic.Int64
+	totalSendErrors       atomic.Uint64
+	totalRecvErrors       atomic.Uint64
+	totalRetries          atomic.Uint64
+	totalFirstResultCount atomic.Uint64
+	totalFirstResultSum   atomic.Int64
 }
 
 // Stats trả về snapshot thống kê tích lũy: tổng lỗi, retries và latency từ cả stream đang chạy và đã đóng.
@@ -104,8 +87,6 @@ func (m *Manager) Stats() ManagerStats {
 	m.mu.RLock()
 	var activeSend, activeRecv uint64
 	var activeRetries int
-	var activeLatCount uint64
-	var activeLatSum, activeLatLast int64
 	var activeFirstCount uint64
 	var activeFirstSum int64
 	for _, s := range m.streams {
@@ -113,11 +94,6 @@ func (m *Manager) Stats() ManagerStats {
 		activeSend += st.SendErrors
 		activeRecv += st.RecvErrors
 		activeRetries += st.Retries
-		activeLatCount += st.LatencyCount
-		activeLatSum += st.LatencySum
-		if st.LatencyLast > activeLatLast {
-			activeLatLast = st.LatencyLast
-		}
 		if st.FirstResultMs > 0 {
 			activeFirstCount++
 			activeFirstSum += st.FirstResultMs
@@ -125,18 +101,10 @@ func (m *Manager) Stats() ManagerStats {
 	}
 	m.mu.RUnlock()
 
-	latLast := m.totalLatencyLast.Load()
-	if activeLatLast > latLast {
-		latLast = activeLatLast
-	}
-
 	return ManagerStats{
 		TotalSendErrors:   m.totalSendErrors.Load() + activeSend,
 		TotalRecvErrors:   m.totalRecvErrors.Load() + activeRecv,
 		TotalRetries:      m.totalRetries.Load() + uint64(activeRetries),
-		LatencyCount:      m.totalLatencyCount.Load() + activeLatCount,
-		LatencySum:        m.totalLatencySum.Load() + activeLatSum,
-		LatencyLast:       latLast,
 		LatencyFirstCount: m.totalFirstResultCount.Load() + activeFirstCount,
 		LatencyFirstSum:   m.totalFirstResultSum.Load() + activeFirstSum,
 	}
@@ -195,6 +163,7 @@ func (m *Manager) Open(
 	go s.runWithReconnect(ctx, m.dialer, client, sessionID, streamID, language, task, audioIn, resultOut)
 
 	m.streams[sessionID] = s
+	slog.Debug("ai: stream opened", "session_id", sessionID, "stream_id", streamID, "language", language, "task", task)
 
 	// Auto-cleanup: accumulate stream stats then remove from map.
 	go func() {
@@ -203,11 +172,6 @@ func (m *Manager) Open(
 		m.totalSendErrors.Add(st.SendErrors)
 		m.totalRecvErrors.Add(st.RecvErrors)
 		m.totalRetries.Add(uint64(st.Retries))
-		m.totalLatencyCount.Add(st.LatencyCount)
-		m.totalLatencySum.Add(st.LatencySum)
-		if st.LatencyLast > 0 {
-			m.totalLatencyLast.Store(st.LatencyLast)
-		}
 		if st.FirstResultMs > 0 {
 			m.totalFirstResultCount.Add(1)
 			m.totalFirstResultSum.Add(st.FirstResultMs)
@@ -235,6 +199,7 @@ func (m *Manager) Close(sessionID string) bool {
 	if !ok {
 		return false
 	}
+	slog.Debug("ai: stream closed", "session_id", sessionID)
 	s.cancel()
 	return true
 }

@@ -2,7 +2,9 @@ package rawrtp
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	pionrtp "github.com/pion/rtp"
@@ -49,6 +51,7 @@ func StartSessionListener(
 		defer releaser.Release(port)
 		defer conn.Close()
 
+		var firstPkt atomic.Bool
 		buf := make([]byte, 1500)
 		for {
 			n, _, err := conn.ReadFrom(buf)
@@ -59,6 +62,9 @@ func StartSessionListener(
 			offset, err := hdr.Unmarshal(buf[:n])
 			if err != nil || offset >= n {
 				continue
+			}
+			if firstPkt.CompareAndSwap(false, true) {
+				slog.Debug("rtp: first packet received", "session_id", sess.ID, "port", port, "ssrc", hdr.SSRC, "pt", hdr.PayloadType)
 			}
 			pkt := pipeline.MediaPacket{
 				SessionID:    sess.ID,

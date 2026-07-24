@@ -58,8 +58,8 @@ type callbackBody struct {
 	Confidence     float64         `json:"confidence"`
 	Language       string          `json:"language"`
 	Seq            int             `json:"seq"`
-	StartMS        int64           `json:"start_ms"`
-	EndMS          int64           `json:"end_ms"`
+	TsStart        int64           `json:"ts_start"`
+	TsEnd          int64           `json:"ts_end"`
 	MediaResources *mediaResources `json:"mediaResources,omitempty"`
 }
 
@@ -106,8 +106,8 @@ func main() {
 			"confidence":     body.Confidence,
 			"language":       body.Language,
 			"seq":            body.Seq,
-			"start_ms":       body.StartMS,
-			"end_ms":         body.EndMS,
+			"ts_start":       body.TsStart,
+			"ts_end":         body.TsEnd,
 			"mediaResources": body.MediaResources,
 		})
 

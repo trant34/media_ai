@@ -4,13 +4,13 @@ package audio
 // Chunk là một đoạn PCM có độ dài cố định được tạo bởi Chunker.
 // pipeline.AudioChunk được tạo từ Chunk này (tách để tránh import cycle).
 type Chunk struct {
-	SessionID   string
-	StreamID    string
-	PCM         []byte
-	SampleRate  int
-	Channels    int
-	TimestampMs int64
-	DurationMs  int64
+	SessionID    string
+	StreamID     string
+	PCM          []byte
+	SampleRate   int
+	Channels     int
+	RTPTimestamp uint32 // RTP timestamp (samples) của packet đầu tiên trong chunk
+	DurationMs   int64
 }
 
 // ChunkerConfig định nghĩa tham số chunk đầu ra.
@@ -20,26 +20,24 @@ type ChunkerConfig struct {
 	ChunkMs    int // độ dài chunk tính bằng ms (ví dụ: 500)
 }
 
-// Chunker tích lũy PCM int16 frames và phát ra AudioChunk có độ dài cố định.
+// Chunker tích lũy PCM int16 frames và phát ra Chunk có độ dài cố định.
 //
-// Timestamp được tính từ số sample đã phát, không phải wall clock,
-// nên chính xác dù có jitter xử lý.
+// RTPTimestamp của mỗi chunk = RTP timestamp của packet RTP đầu tiên đóng góp
+// sample vào chunk đó (lấy trực tiếp từ RTP header, đơn vị: sample).
 //
 // Không goroutine-safe: dùng một Chunker per session/goroutine.
 type Chunker struct {
 	cfg       ChunkerConfig
 	sessionID string
 	streamID  string
-	startMs   int64
 
 	buf        []int16 // accumulation buffer
-	samplesOut int64   // tổng mono samples đã phát
 	chunkSamps int     // samples/chunk = SampleRate * ChunkMs / 1000
+	curRTPTs   uint32  // RTP timestamp của packet đầu tiên trong chunk hiện tại
 }
 
-// NewChunker tạo Chunker. startMs là thời điểm wall-clock của sample đầu tiên,
-// dùng làm gốc cho timestamp của mọi chunk.
-func NewChunker(cfg ChunkerConfig, sessionID, streamID string, startMs int64) *Chunker {
+// NewChunker tạo Chunker mới.
+func NewChunker(cfg ChunkerConfig, sessionID, streamID string) *Chunker {
 	if cfg.Channels <= 0 {
 		cfg.Channels = 1
 	}
@@ -48,7 +46,6 @@ func NewChunker(cfg ChunkerConfig, sessionID, streamID string, startMs int64) *C
 		cfg:        cfg,
 		sessionID:  sessionID,
 		streamID:   streamID,
-		startMs:    startMs,
 		buf:        make([]int16, 0, chunkSamps*2),
 		chunkSamps: chunkSamps,
 	}
@@ -58,10 +55,18 @@ func NewChunker(cfg ChunkerConfig, sessionID, streamID string, startMs int64) *C
 func (c *Chunker) Buffered() int { return len(c.buf) }
 
 // Push nối pcm vào buffer và trả về các chunk hoàn chỉnh (nếu có).
+// rtpTs là RTP timestamp của packet RTP hiện tại (đơn vị: sample từ RTP header).
 // Trả về nil nếu chưa đủ data.
-func (c *Chunker) Push(pcm []int16) []Chunk {
+func (c *Chunker) Push(pcm []int16, rtpTs uint32) []Chunk {
 	if len(pcm) == 0 {
 		return nil
+	}
+
+	// oldCount: số sample từ các packet cũ còn trong buffer trước khi nối thêm.
+	// Dùng để xác định đúng thời điểm chunk kế tiếp bắt đầu bởi packet hiện tại.
+	oldCount := len(c.buf)
+	if oldCount == 0 {
+		c.curRTPTs = rtpTs
 	}
 	c.buf = append(c.buf, pcm...)
 
@@ -73,6 +78,14 @@ func (c *Chunker) Push(pcm []int16) []Chunk {
 	for len(c.buf) >= c.chunkSamps {
 		chunks = append(chunks, c.emit(c.buf[:c.chunkSamps]))
 		c.buf = c.buf[c.chunkSamps:]
+		// Giảm số sample cũ còn trong buf; khi hết, chunk tiếp theo bắt đầu bởi packet hiện tại.
+		if oldCount > 0 {
+			oldCount -= c.chunkSamps
+			if oldCount <= 0 {
+				oldCount = 0
+				c.curRTPTs = rtpTs
+			}
+		}
 	}
 	return chunks
 }
@@ -88,19 +101,16 @@ func (c *Chunker) Flush() *Chunk {
 	return &chunk
 }
 
-// emit tạo Chunk từ samples và cập nhật bộ đếm sample.
+// emit tạo Chunk từ samples dùng RTP timestamp hiện tại.
 func (c *Chunker) emit(samples []int16) Chunk {
-	tsMs := c.startMs + c.samplesOut*1000/int64(c.cfg.SampleRate)
 	durMs := int64(len(samples)) * 1000 / int64(c.cfg.SampleRate)
-	chunk := Chunk{
-		SessionID:   c.sessionID,
-		StreamID:    c.streamID,
-		PCM:         Int16ToS16LE(samples),
-		SampleRate:  c.cfg.SampleRate,
-		Channels:    c.cfg.Channels,
-		TimestampMs: tsMs,
-		DurationMs:  durMs,
+	return Chunk{
+		SessionID:    c.sessionID,
+		StreamID:     c.streamID,
+		PCM:          Int16ToS16LE(samples),
+		SampleRate:   c.cfg.SampleRate,
+		Channels:     c.cfg.Channels,
+		RTPTimestamp: c.curRTPTs,
+		DurationMs:   durMs,
 	}
-	c.samplesOut += int64(len(samples))
-	return chunk
 }

@@ -151,7 +151,7 @@ func TestNotifyEvent_Answer_Created(t *testing.T) {
 
 	w := postJSON(t, s, notifyPath(testCallID), validAnswerReq())
 
-	assertStatus(t, w, http.StatusCreated)
+	assertStatus(t, w, http.StatusOK)
 	assertContentType(t, w)
 
 	var resp SessionResponse
@@ -567,8 +567,8 @@ func TestH2C_FullSessionLifecycle(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST status: want 201, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status: want 200, got %d", resp.StatusCode)
 	}
 	if resp.Proto != "HTTP/2.0" {
 		t.Errorf("POST proto: want HTTP/2.0, got %s", resp.Proto)

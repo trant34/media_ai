@@ -23,7 +23,6 @@ import (
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/result"
 	"media-ai-gateway/internal/session"
-
 )
 
 // GatewayConfig là cấu hình đầy đủ cho Media AI Gateway.
@@ -70,10 +69,10 @@ type GatewaySection struct {
 // ServerSection cấu hình HTTP/2 control plane.
 type ServerSection struct {
 	HTTPAddr           string `yaml:"http_addr"`
-	PublicURL          string `yaml:"public_url"`          // địa chỉ public của DCAS, dùng trong callbackUrl gửi DCSF
+	PublicURL          string `yaml:"public_url"` // địa chỉ public của DCAS, dùng trong callbackUrl gửi DCSF
 	CertFile           string `yaml:"cert_file"`
 	KeyFile            string `yaml:"key_file"`
-	MetricsAddr        string `yaml:"metrics_addr"`        // "" = serve /metrics tại HTTPAddr
+	MetricsAddr        string `yaml:"metrics_addr"` // "" = serve /metrics tại HTTPAddr
 	ShutdownTimeoutSec int    `yaml:"shutdown_timeout_sec"`
 }
 
@@ -89,14 +88,14 @@ type RTPSection struct {
 
 // WebRTCSection cấu hình WebRTC ingress và ICE.
 type WebRTCSection struct {
-	Enabled     bool         `yaml:"enabled"`
-	STUNServers []string     `yaml:"stun_servers"`
-	TURNServers []TURNServer `yaml:"turn_servers"`
-	NAT1To1IPs  []string     `yaml:"nat1to1_ips"`
-	ICEPortMin  uint16       `yaml:"ice_port_min"`
-	ICEPortMax  uint16       `yaml:"ice_port_max"`
-	DCProxyURL     string `yaml:"dc_proxy_url"`
-	DCUDPProxyAddr string `yaml:"dc_udp_proxy_addr"`
+	Enabled        bool         `yaml:"enabled"`
+	STUNServers    []string     `yaml:"stun_servers"`
+	TURNServers    []TURNServer `yaml:"turn_servers"`
+	NAT1To1IPs     []string     `yaml:"nat1to1_ips"`
+	ICEPortMin     uint16       `yaml:"ice_port_min"`
+	ICEPortMax     uint16       `yaml:"ice_port_max"`
+	DCProxyURL     string       `yaml:"dc_proxy_url"`
+	DCUDPProxyAddr string       `yaml:"dc_udp_proxy_addr"`
 }
 
 // TURNServer mô tả một TURN server.
@@ -135,15 +134,15 @@ type AudioSection struct {
 
 // AISection cấu hình kết nối tới AI worker và gRPC stream.
 type AISection struct {
-	GRPCTarget           string `yaml:"grpc_target"`
-	MaxActiveStreams      int    `yaml:"max_active_streams"`
-	PerStreamQueueSize   int    `yaml:"per_stream_queue_size"`
-	SendTimeoutMs        int    `yaml:"send_timeout_ms"`
-	StreamTimeoutSec     int    `yaml:"stream_timeout_sec"`
-	MaxRetry             int    `yaml:"max_retry"`
-	RetryBackoffMs       int    `yaml:"retry_backoff_ms"`
-	KeepaliveTimeSec     int    `yaml:"keepalive_time_sec"`    // gửi HTTP/2 PING sau N giây idle; 0 = tắt
-	KeepaliveTimeoutSec  int    `yaml:"keepalive_timeout_sec"` // đóng conn nếu không PONG trong N giây
+	GRPCTarget          string `yaml:"grpc_target"`
+	MaxActiveStreams    int    `yaml:"max_active_streams"`
+	PerStreamQueueSize  int    `yaml:"per_stream_queue_size"`
+	SendTimeoutMs       int    `yaml:"send_timeout_ms"`
+	StreamTimeoutSec    int    `yaml:"stream_timeout_sec"`
+	MaxRetry            int    `yaml:"max_retry"`
+	RetryBackoffMs      int    `yaml:"retry_backoff_ms"`
+	KeepaliveTimeSec    int    `yaml:"keepalive_time_sec"`    // gửi HTTP/2 PING sau N giây idle; 0 = tắt
+	KeepaliveTimeoutSec int    `yaml:"keepalive_timeout_sec"` // đóng conn nếu không PONG trong N giây
 }
 
 // ResultSection cấu hình Result Dispatcher.
@@ -156,7 +155,7 @@ type ResultSection struct {
 
 // CallbackSection cấu hình HTTP callback sink.
 type CallbackSection struct {
-	URL               string `yaml:"url"`                  // optional: pre-connect target khi app khởi động
+	URL               string `yaml:"url"` // optional: pre-connect target khi app khởi động
 	TimeoutMs         int    `yaml:"timeout_ms"`
 	MaxRetry          int    `yaml:"max_retry"`
 	RetryBackoffMs    int    `yaml:"retry_backoff_ms"`
@@ -166,8 +165,8 @@ type CallbackSection struct {
 
 // LogSection cấu hình logging và periodic monitor.
 type LogSection struct {
-	Level              string `yaml:"level"`               // debug | info | warn | error
-	Format             string `yaml:"format"`              // json | text
+	Level              string `yaml:"level"`                // debug | info | warn | error
+	Format             string `yaml:"format"`               // json | text
 	MonitorIntervalSec int    `yaml:"monitor_interval_sec"` // in chu kỳ stats; 0 = tắt
 }
 
@@ -214,7 +213,7 @@ func Default() GatewayConfig {
 		},
 		AI: AISection{
 			GRPCTarget:          "ai-router:50051",
-			MaxActiveStreams:     1000,
+			MaxActiveStreams:    1000,
 			PerStreamQueueSize:  20,
 			SendTimeoutMs:       500,
 			StreamTimeoutSec:    300,
@@ -288,11 +287,11 @@ func (c GatewayConfig) ToWorkerPoolConfig() pipeline.WorkerPoolConfig {
 func (c GatewayConfig) ToAIConfig() ai.Config {
 	return ai.Config{
 		MaxActiveStreams: c.AI.MaxActiveStreams,
-		QueueSize:       c.AI.PerStreamQueueSize,
-		SendTimeout:     time.Duration(c.AI.SendTimeoutMs) * time.Millisecond,
-		StreamTimeout:   time.Duration(c.AI.StreamTimeoutSec) * time.Second,
-		MaxRetries:      c.AI.MaxRetry,
-		RetryBackoff:    time.Duration(c.AI.RetryBackoffMs) * time.Millisecond,
+		QueueSize:        c.AI.PerStreamQueueSize,
+		SendTimeout:      time.Duration(c.AI.SendTimeoutMs) * time.Millisecond,
+		StreamTimeout:    time.Duration(c.AI.StreamTimeoutSec) * time.Second,
+		MaxRetries:       c.AI.MaxRetry,
+		RetryBackoff:     time.Duration(c.AI.RetryBackoffMs) * time.Millisecond,
 	}
 }
 
@@ -354,6 +353,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		RTPPortStart:           c.RTP.PortStart,
 		RTPPortEnd:             c.RTP.PortEnd,
 		DCSFCallControlTimeout: time.Duration(c.DCSF.CallControlTimeoutMs) * time.Millisecond,
+		ResultCallbackURL:      c.Callback.URL,
 		WebRTCEnabled:          c.Gateway.WebRTCEnabled,
 		WebRTC:                 c.ToWebRTCConfig(),
 	}
@@ -381,9 +381,9 @@ func (c GatewayConfig) ToDCSFAddrs() []string {
 // ToWebRTCConfig chuyển đổi sang webrtcingress.Config.
 func (c GatewayConfig) ToWebRTCConfig() webrtcingress.Config {
 	cfg := webrtcingress.Config{
-		NAT1To1IPs: c.WebRTC.NAT1To1IPs,
-		ICEPortMin: c.WebRTC.ICEPortMin,
-		ICEPortMax: c.WebRTC.ICEPortMax,
+		NAT1To1IPs:     c.WebRTC.NAT1To1IPs,
+		ICEPortMin:     c.WebRTC.ICEPortMin,
+		ICEPortMax:     c.WebRTC.ICEPortMax,
 		DCProxyURL:     c.WebRTC.DCProxyURL,
 		DCUDPProxyAddr: c.WebRTC.DCUDPProxyAddr,
 	}

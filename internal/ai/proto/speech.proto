@@ -18,27 +18,27 @@ service SpeechStream {
 
 // AudioChunk là một đoạn audio PCM 16kHz mono gửi sang AI worker.
 message AudioChunk {
-  string session_id  = 1;  // session ID của gateway
-  string stream_id   = 2;  // stream ID (thường = track_id hoặc SSRC hex)
-  bytes  pcm         = 3;  // PCM S16LE raw bytes
-  int32  sample_rate = 4;  // Hz (thường 16000)
-  int32  channels    = 5;  // kênh (thường 1 = mono)
-  int64  timestamp_ms = 6; // thời điểm đầu chunk (Unix ms)
-  int64  duration_ms  = 7; // thời lượng chunk (ms)
-  bool   end_of_stream = 8; // true = chunk cuối, đóng stream sau khi nhận
-  string language    = 9;  // mã ngôn ngữ BCP-47, ví dụ "vi", "en"
-  string task        = 10; // "transcribe" | "translate"
+  string session_id    = 1;  // session ID của gateway
+  string stream_id     = 2;  // stream ID (thường = track_id hoặc SSRC hex)
+  bytes  pcm           = 3;  // PCM S16LE raw bytes
+  int32  sample_rate   = 4;  // Hz (thường 16000)
+  int32  channels      = 5;  // kênh (thường 1 = mono)
+  uint32 rtp_timestamp = 6;  // RTP timestamp (samples) của packet đầu tiên trong chunk
+  int64  duration_ms   = 7;  // thời lượng chunk (ms)
+  bool   end_of_stream = 8;  // true = chunk cuối, đóng stream sau khi nhận
+  string language      = 9;  // mã ngôn ngữ BCP-47, ví dụ "vi", "en"
+  string task          = 10; // "transcribe" | "translate"
 }
 
 // RecognitionResult là kết quả ASR cho một đoạn audio.
 message RecognitionResult {
-  string session_id  = 1;  // echo lại session_id từ AudioChunk
-  string stream_id   = 2;  // echo lại stream_id
-  string text        = 3;  // văn bản nhận dạng
-  bool   is_final    = 4;  // false = partial; true = kết quả cuối của đoạn
-  int64  start_ms    = 5;  // bắt đầu đoạn audio (Unix ms)
-  int64  end_ms      = 6;  // kết thúc đoạn audio (Unix ms)
-  float  confidence  = 7;  // 0..1; 0 nếu model không cung cấp
-  string language    = 8;  // ngôn ngữ thực tế nhận dạng được
-  uint64 seq         = 9;  // số thứ tự tăng dần per-session
+  string session_id = 1;  // echo lại session_id từ AudioChunk
+  string stream_id  = 2;  // echo lại stream_id
+  string text       = 3;  // văn bản nhận dạng
+  bool   is_final   = 4;  // false = partial; true = kết quả cuối của đoạn
+  int64  ts_start   = 5;  // RTP timestamp bắt đầu đoạn (samples)
+  int64  ts_end     = 6;  // RTP timestamp kết thúc đoạn (samples)
+  float  confidence = 7;  // 0..1; 0 nếu model không cung cấp
+  string language   = 8;  // ngôn ngữ thực tế nhận dạng được
+  uint64 seq        = 9;  // số thứ tự tăng dần per-session
 }

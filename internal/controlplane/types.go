@@ -41,6 +41,37 @@ type SessionEvent struct {
 	CallbackURL      string         `json:"callbackUrl,omitempty"` // ANSWER only: URL DCAS dùng để POST CALL_CTRL về DCSF
 }
 
+// UnmarshalJSON cho phép calling/called là string hoặc array — bỏ qua nếu không phải string.
+func (e *SessionEvent) UnmarshalJSON(b []byte) error {
+	type raw struct {
+		CallID           string          `json:"callId"`
+		Event            string          `json:"event"`
+		SelectedService  string          `json:"selectedService,omitempty"`
+		Direction        string          `json:"direction,omitempty"`
+		Role             string          `json:"role,omitempty"`
+		BearerCapability string          `json:"bearerCapability,omitempty"`
+		Location         *EventLocation  `json:"location,omitempty"`
+		Calling          json.RawMessage `json:"calling,omitempty"`
+		Called           json.RawMessage `json:"called,omitempty"`
+		CallbackURL      string          `json:"callbackUrl,omitempty"`
+	}
+	var r raw
+	if err := json.Unmarshal(b, &r); err != nil {
+		return err
+	}
+	e.CallID = r.CallID
+	e.Event = r.Event
+	e.SelectedService = r.SelectedService
+	e.Direction = r.Direction
+	e.Role = r.Role
+	e.BearerCapability = r.BearerCapability
+	e.Location = r.Location
+	e.CallbackURL = r.CallbackURL
+	json.Unmarshal(r.Calling, &e.Calling) //nolint:errcheck
+	json.Unmarshal(r.Called, &e.Called)   //nolint:errcheck
+	return nil
+}
+
 // EventLocation mô tả vị trí địa lý của UE trong sự kiện DCSF.
 type EventLocation struct {
 	AreaNumber string `json:"areaNumber,omitempty"`
@@ -147,12 +178,6 @@ type AIWorkerConn struct {
 
 // AILatencyStats là thống kê latency của AI worker.
 type AILatencyStats struct {
-	// End-to-result: thời gian từ cuối audio (end_ms) đến khi nhận kết quả.
-	// Count=0 nếu AI worker không set end_ms trong RecognitionResult.
-	LastMs int64  `json:"last_ms"` // latency của result gần nhất (ms)
-	AvgMs  int64  `json:"avg_ms"`  // latency trung bình (ms)
-	Count  uint64 `json:"count"`   // số result đã đo được
-
 	// First-result: thời gian từ khi stream mở đến khi nhận result đầu tiên.
 	AvgFirstResultMs int64 `json:"avg_first_result_ms"` // trung bình qua các stream đã hoàn thành
 }

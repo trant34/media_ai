@@ -66,9 +66,9 @@ func marshalAudioChunk(m *audioChunkWire) []byte {
 		b = protowire.AppendTag(b, 5, protowire.VarintType)
 		b = protowire.AppendVarint(b, uint64(int32(m.Channels)))
 	}
-	if m.TimestampMs != 0 {
+	if m.RTPTimestamp != 0 {
 		b = protowire.AppendTag(b, 6, protowire.VarintType)
-		b = protowire.AppendVarint(b, uint64(m.TimestampMs))
+		b = protowire.AppendVarint(b, uint64(m.RTPTimestamp))
 	}
 	if m.DurationMs != 0 {
 		b = protowire.AppendTag(b, 7, protowire.VarintType)
@@ -131,14 +131,14 @@ func unmarshalRecognitionResult(b []byte, m *recognitionResultWire) error {
 			if n < 0 {
 				return protowire.ParseError(n)
 			}
-			m.StartMs = int64(v)
+			m.TsStart = int64(v)
 			b = b[n:]
 		case num == 6 && typ == protowire.VarintType:
 			v, n := protowire.ConsumeVarint(b)
 			if n < 0 {
 				return protowire.ParseError(n)
 			}
-			m.EndMs = int64(v)
+			m.TsEnd = int64(v)
 			b = b[n:]
 		case num == 7 && typ == protowire.Fixed32Type:
 			v, n := protowire.ConsumeFixed32(b)
@@ -175,16 +175,16 @@ func unmarshalRecognitionResult(b []byte, m *recognitionResultWire) error {
 // audioChunkWire là wire type của AudioChunk gửi tới AI worker.
 // Language và Task không có trong pipeline.AudioChunk nên được truyền riêng.
 type audioChunkWire struct {
-	SessionID   string
-	StreamID    string
-	PCM         []byte
-	SampleRate  int
-	Channels    int
-	TimestampMs int64
-	DurationMs  int64
-	EndOfStream bool
-	Language    string
-	Task        string
+	SessionID    string
+	StreamID     string
+	PCM          []byte
+	SampleRate   int
+	Channels     int
+	RTPTimestamp uint32
+	DurationMs   int64
+	EndOfStream  bool
+	Language     string
+	Task         string
 }
 
 // recognitionResultWire là wire type nhận từ AI worker.
@@ -193,8 +193,8 @@ type recognitionResultWire struct {
 	StreamID   string
 	Text       string
 	IsFinal    bool
-	StartMs    int64
-	EndMs      int64
+	TsStart    int64
+	TsEnd      int64
 	Confidence float32
 	Language   string
 	Seq        uint64
@@ -222,7 +222,7 @@ func NewSharedConnPool(keepaliveTime, keepaliveTimeout time.Duration) *SharedCon
 		opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                keepaliveTime,
 			Timeout:             keepaliveTimeout,
-			PermitWithoutStream: true, // gửi PING ngay cả khi không có stream active
+			PermitWithoutStream: false, // chỉ PING khi có stream active — tránh ENHANCE_YOUR_CALM
 		}))
 	}
 	return &SharedConnPool{
@@ -267,6 +267,40 @@ func (p *SharedConnPool) State(addr string) connectivity.State {
 		return connectivity.Idle
 	}
 	return conn.GetState()
+}
+
+// WatchAndReconnect theo dõi trạng thái kết nối tới addr và gọi conn.Connect()
+// ngay khi phát hiện TRANSIENT_FAILURE — thay vì đợi gRPC built-in backoff.
+// Block cho đến khi ctx bị cancel hoặc conn bị Shutdown.
+// Nên gọi dưới dạng goroutine sau Preconnect.
+func (p *SharedConnPool) WatchAndReconnect(ctx context.Context, addr string) {
+	p.mu.Lock()
+	conn, ok := p.conns[addr]
+	p.mu.Unlock()
+	if !ok {
+		slog.Warn("ai: grpc watch: no connection", "addr", addr)
+		return
+	}
+
+	state := conn.GetState()
+	for {
+		if !conn.WaitForStateChange(ctx, state) {
+			return // ctx cancelled
+		}
+		state = conn.GetState()
+		slog.Debug("ai: grpc state change", "addr", addr, "state", state)
+		switch state {
+		case connectivity.Idle:
+			// Sau GOAWAY (graceful disconnect), conn về IDLE — reconnect ngay.
+			conn.Connect()
+		case connectivity.TransientFailure:
+			slog.Warn("ai: grpc transient failure, triggering reconnect", "addr", addr)
+			conn.Connect()
+		case connectivity.Shutdown:
+			slog.Error("ai: grpc connection shutdown", "addr", addr)
+			return
+		}
+	}
 }
 
 // Addrs trả về danh sách địa chỉ đã có conn trong pool.
@@ -323,16 +357,16 @@ func (c *grpcStreamClient) Send(chunk pipeline.AudioChunk) error {
 		)
 	}
 	return c.cs.SendMsg(&audioChunkWire{
-		SessionID:   chunk.SessionID,
-		StreamID:    chunk.StreamID,
-		PCM:         chunk.PCM,
-		SampleRate:  chunk.SampleRate,
-		Channels:    chunk.Channels,
-		TimestampMs: chunk.TimestampMs,
-		DurationMs:  chunk.DurationMs,
-		EndOfStream: chunk.EndOfStream,
-		Language:    c.language,
-		Task:        c.task,
+		SessionID:    chunk.SessionID,
+		StreamID:     chunk.StreamID,
+		PCM:          chunk.PCM,
+		SampleRate:   chunk.SampleRate,
+		Channels:     chunk.Channels,
+		RTPTimestamp: chunk.RTPTimestamp,
+		DurationMs:   chunk.DurationMs,
+		EndOfStream:  chunk.EndOfStream,
+		Language:     c.language,
+		Task:         c.task,
 	})
 }
 
@@ -346,8 +380,8 @@ func (c *grpcStreamClient) Recv() (pipeline.RecognitionResult, error) {
 		StreamID:   w.StreamID,
 		Text:       w.Text,
 		IsFinal:    w.IsFinal,
-		StartMs:    w.StartMs,
-		EndMs:      w.EndMs,
+		TsStart:    w.TsStart,
+		TsEnd:      w.TsEnd,
 		Confidence: w.Confidence,
 		Language:   w.Language,
 		Seq:        w.Seq,

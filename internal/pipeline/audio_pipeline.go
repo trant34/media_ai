@@ -30,7 +30,6 @@ type SessionConfig struct {
 	// Metadata
 	SessionID string
 	StreamID  string
-	StartMs   int64 // wall-clock ms của packet đầu tiên, gốc timestamp cho chunks
 
 	// Debug: nếu non-empty, ghi raw decoded PCM (int16-LE) vào thư mục này.
 	// Tên file: <session_id>.<codec>.<rate>hz.<ch>ch.s16le
@@ -83,18 +82,18 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 	}
 
 	resampled := sp.resampler.Resample(pcm)
-	chunks := sp.chunker.Push(resampled)
+	chunks := sp.chunker.Push(resampled, pkt.Timestamp)
 
 	emitted := 0
 	for _, ac := range chunks {
 		chunk := AudioChunk{
-			SessionID:   ac.SessionID,
-			StreamID:    ac.StreamID,
-			PCM:         ac.PCM,
-			SampleRate:  ac.SampleRate,
-			Channels:    ac.Channels,
-			TimestampMs: ac.TimestampMs,
-			DurationMs:  ac.DurationMs,
+			SessionID:    ac.SessionID,
+			StreamID:     ac.StreamID,
+			PCM:          ac.PCM,
+			SampleRate:   ac.SampleRate,
+			Channels:     ac.Channels,
+			RTPTimestamp: ac.RTPTimestamp,
+			DurationMs:   ac.DurationMs,
 		}
 		select {
 		case sp.audioOut <- chunk:
@@ -131,14 +130,14 @@ func (sp *sessionPipeline) flush() {
 	}
 	select {
 	case sp.audioOut <- AudioChunk{
-		SessionID:   ac.SessionID,
-		StreamID:    ac.StreamID,
-		PCM:         ac.PCM,
-		SampleRate:  ac.SampleRate,
-		Channels:    ac.Channels,
-		TimestampMs: ac.TimestampMs,
-		DurationMs:  ac.DurationMs,
-		EndOfStream: true,
+		SessionID:    ac.SessionID,
+		StreamID:     ac.StreamID,
+		PCM:          ac.PCM,
+		SampleRate:   ac.SampleRate,
+		Channels:     ac.Channels,
+		RTPTimestamp: ac.RTPTimestamp,
+		DurationMs:   ac.DurationMs,
+		EndOfStream:  true,
 	}:
 	default:
 	}
@@ -157,7 +156,7 @@ func newSessionPipeline(ctx context.Context, cfg SessionConfig, audioOut chan<- 
 			Channels:   cfg.OutChannels,
 			ChunkMs:    cfg.ChunkMs,
 		},
-		cfg.SessionID, cfg.StreamID, cfg.StartMs,
+		cfg.SessionID, cfg.StreamID,
 	)
 
 	var pcmFile *os.File

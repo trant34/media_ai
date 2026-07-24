@@ -21,8 +21,8 @@ type RecognitionResult struct {
 	SourceType     string          `json:"source_type"`
 	Text           string          `json:"text"`
 	IsFinal        bool            `json:"is_final"`
-	StartMs        int64           `json:"start_ms"`
-	EndMs          int64           `json:"end_ms"`
+	TsStart        int64           `json:"ts_start"`
+	TsEnd          int64           `json:"ts_end"`
 	Confidence     float32         `json:"confidence,omitempty"`
 	Language       string          `json:"language,omitempty"`
 	Seq            uint64          `json:"seq"`

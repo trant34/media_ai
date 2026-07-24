@@ -36,8 +36,8 @@ func sampleResult(isFinal bool) pipeline.RecognitionResult {
 		SourceType: "webrtc",
 		Text:       "hello world",
 		IsFinal:    isFinal,
-		StartMs:    100,
-		EndMs:      500,
+		TsStart:    100,
+		TsEnd:      500,
 		Confidence: 0.95,
 		Language:   "en",
 		Seq:        42,
@@ -157,11 +157,11 @@ func TestDataChannelSink_Send_JSONPayload(t *testing.T) {
 	if msg.IsFinal != r.IsFinal {
 		t.Errorf("IsFinal = %v, want %v", msg.IsFinal, r.IsFinal)
 	}
-	if msg.StartMs != r.StartMs {
-		t.Errorf("StartMs = %d, want %d", msg.StartMs, r.StartMs)
+	if msg.TsStart != r.TsStart {
+		t.Errorf("TsStart = %d, want %d", msg.TsStart, r.TsStart)
 	}
-	if msg.EndMs != r.EndMs {
-		t.Errorf("EndMs = %d, want %d", msg.EndMs, r.EndMs)
+	if msg.TsEnd != r.TsEnd {
+		t.Errorf("TsEnd = %d, want %d", msg.TsEnd, r.TsEnd)
 	}
 	if msg.Confidence != r.Confidence {
 		t.Errorf("Confidence = %v, want %v", msg.Confidence, r.Confidence)

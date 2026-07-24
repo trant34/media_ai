@@ -43,11 +43,6 @@ type Stream struct {
 	recvErrors      atomic.Uint64
 	endOfStreamSent atomic.Bool
 
-	// Latency tracking (end_ms-to-recv, ms).
-	latencyCount atomic.Uint64 // số result có end_ms hợp lệ
-	latencySum   atomic.Int64  // tổng latency (ms)
-	latencyLast  atomic.Int64  // latency của result gần nhất (ms)
-
 	// First-result latency: ms từ lúc stream mở đến khi nhận result đầu tiên.
 	firstResultMs atomic.Int64 // 0 = chưa nhận result nào
 }
@@ -57,11 +52,6 @@ type StreamStats struct {
 	SendErrors uint64
 	RecvErrors uint64
 	Retries    int
-
-	// Latency stats (end_ms-to-recv, ms). Count=0 nếu AI không set end_ms.
-	LatencyCount uint64
-	LatencySum   int64
-	LatencyLast  int64
 
 	// FirstResultMs: ms từ stream open đến result đầu tiên; 0 nếu chưa có result.
 	FirstResultMs int64
@@ -76,9 +66,6 @@ func (s *Stream) Stats() StreamStats {
 		SendErrors:    s.sendErrors.Load(),
 		RecvErrors:    s.recvErrors.Load(),
 		Retries:       retries,
-		LatencyCount:  s.latencyCount.Load(),
-		LatencySum:    s.latencySum.Load(),
-		LatencyLast:   s.latencyLast.Load(),
 		FirstResultMs: s.firstResultMs.Load(),
 	}
 }
@@ -287,6 +274,7 @@ func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-cha
 				if !isCtxErr(err) {
 					s.sendErrors.Add(1)
 					s.setErr(err)
+					slog.Debug("ai: send error to worker", "session_id", s.SessionID, "stream_id", s.StreamID, "error", err)
 				}
 				return
 			}
@@ -353,16 +341,6 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 				"session_id", s.SessionID,
 				"first_result_ms", now-s.OpenedAt.UnixMilli(),
 			)
-		}
-
-		// End-to-result latency (audio end → result received).
-		if r.EndMs > 0 {
-			lat := now - r.EndMs
-			if lat >= 0 {
-				s.latencyCount.Add(1)
-				s.latencySum.Add(lat)
-				s.latencyLast.Store(lat)
-			}
 		}
 
 		select {

@@ -147,5 +147,6 @@ func (p *DCSFPool) SendCallControl(ctx context.Context, dcsfURL, callID, service
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("dcsf: call-control status %d", resp.StatusCode)
 	}
+	slog.Debug("dcas→dcsf: call-control OK", "call_id", callID, "url", dcsfURL, "status", resp.StatusCode)
 	return nil
 }

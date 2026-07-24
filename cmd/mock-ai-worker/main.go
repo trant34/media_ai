@@ -59,7 +59,7 @@ type audioChunkWire struct {
 	PCM         []byte
 	SampleRate  int
 	Channels    int
-	TimestampMs int64
+	RTPTimestamp uint32
 	DurationMs  int64
 	EndOfStream bool
 	Language    string
@@ -71,8 +71,8 @@ type recognitionResultWire struct {
 	StreamID   string
 	Text       string
 	IsFinal    bool
-	StartMs    int64
-	EndMs      int64
+	TsStart    int64
+	TsEnd      int64
 	Confidence float32
 	Language   string
 	Seq        uint64
@@ -128,7 +128,7 @@ func unmarshalAudioChunk(b []byte, m *audioChunkWire) error {
 			if n < 0 {
 				return protowire.ParseError(n)
 			}
-			m.TimestampMs = int64(v)
+			m.RTPTimestamp = uint32(v)
 			b = b[n:]
 		case num == 7 && typ == protowire.VarintType:
 			v, n := protowire.ConsumeVarint(b)
@@ -187,13 +187,13 @@ func marshalRecognitionResult(m *recognitionResultWire) []byte {
 		b = protowire.AppendTag(b, 4, protowire.VarintType)
 		b = protowire.AppendVarint(b, 1)
 	}
-	if m.StartMs != 0 {
+	if m.TsStart != 0 {
 		b = protowire.AppendTag(b, 5, protowire.VarintType)
-		b = protowire.AppendVarint(b, uint64(m.StartMs))
+		b = protowire.AppendVarint(b, uint64(m.TsStart))
 	}
-	if m.EndMs != 0 {
+	if m.TsEnd != 0 {
 		b = protowire.AppendTag(b, 6, protowire.VarintType)
-		b = protowire.AppendVarint(b, uint64(m.EndMs))
+		b = protowire.AppendVarint(b, uint64(m.TsEnd))
 	}
 	if m.Confidence != 0 {
 		b = protowire.AppendTag(b, 7, protowire.Fixed32Type)
@@ -231,15 +231,13 @@ var finalPhrases = []string{
 
 func recognizeHandler(_ any, stream grpc.ServerStream) error {
 	var (
-		chunkCount uint64
-		seq        uint64
-		sessionID  string
-		streamID   string
-		language   string
-		startMs    int64
+		chunkCount   uint64
+		seq          uint64
+		sessionID    string
+		streamID     string
+		language     string
+		startRTPTs   uint32
 	)
-
-	startMs = time.Now().UnixMilli()
 
 	for {
 		var chunk audioChunkWire
@@ -257,7 +255,7 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			if language == "" {
 				language = "vi"
 			}
-			startMs = chunk.TimestampMs
+			startRTPTs = chunk.RTPTimestamp
 			slog.Info("stream opened",
 				"session_id", sessionID,
 				"stream_id", streamID,
@@ -267,8 +265,6 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 		}
 		chunkCount++
 
-		endMs := time.Now().UnixMilli()
-
 		if chunkCount%3 == 0 {
 			seq++
 			partial := &recognitionResultWire{
@@ -276,8 +272,8 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				StreamID:   streamID,
 				Text:       partialPhrases[(chunkCount/3-1)%uint64(len(partialPhrases))],
 				IsFinal:    false,
-				StartMs:    startMs,
-				EndMs:      endMs,
+				TsStart:    int64(startRTPTs),
+				TsEnd:      int64(chunk.RTPTimestamp),
 				Confidence: 0,
 				Language:   language,
 				Seq:        seq,
@@ -295,8 +291,8 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				StreamID:   streamID,
 				Text:       finalPhrases[(chunkCount/6-1)%uint64(len(finalPhrases))],
 				IsFinal:    true,
-				StartMs:    startMs,
-				EndMs:      endMs,
+				TsStart:    int64(startRTPTs),
+				TsEnd:      int64(chunk.RTPTimestamp),
 				Confidence: 0.92,
 				Language:   language,
 				Seq:        seq,
@@ -310,7 +306,7 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				"text", final.Text,
 				"chunks", chunkCount,
 			)
-			startMs = endMs
+			startRTPTs = chunk.RTPTimestamp
 		}
 
 		if chunk.EndOfStream {
@@ -320,8 +316,8 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				StreamID:   streamID,
 				Text:       fmt.Sprintf("[end] %s", finalPhrases[seq%uint64(len(finalPhrases))]),
 				IsFinal:    true,
-				StartMs:    startMs,
-				EndMs:      time.Now().UnixMilli(),
+				TsStart:    int64(startRTPTs),
+				TsEnd:      int64(chunk.RTPTimestamp),
 				Confidence: 0.95,
 				Language:   language,
 				Seq:        seq,

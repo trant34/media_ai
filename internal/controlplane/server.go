@@ -77,6 +77,10 @@ type ServerConfig struct {
 	// Dùng để xây callbackUrl trong CALL_CTRL body để DCSF biết gửi ctrl-result về đâu.
 	PublicURL string
 
+	// ResultCallbackURL là URL global để gửi kết quả transcript (recognition result).
+	// Dùng làm default callback sink cho tất cả DCSF session khi không có per-session URL.
+	ResultCallbackURL string
+
 	// WebRTCEnabled bật/tắt WebRTC ingress. false → POST /v1/webrtc/offer trả 404.
 	WebRTCEnabled bool
 

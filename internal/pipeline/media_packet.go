@@ -21,12 +21,12 @@ type MediaPacket struct {
 
 // AudioChunk là output của audio pipeline, sẵn sàng gửi sang AI.
 type AudioChunk struct {
-	SessionID   string
-	StreamID    string
-	PCM         []byte
-	SampleRate  int
-	Channels    int
-	TimestampMs int64
-	DurationMs  int64
-	EndOfStream bool // true = chunk cuối của stream, AI worker đóng nhận dạng sau chunk này
+	SessionID    string
+	StreamID     string
+	PCM          []byte
+	SampleRate   int
+	Channels     int
+	RTPTimestamp uint32 // RTP timestamp (samples) của packet đầu tiên trong chunk
+	DurationMs   int64
+	EndOfStream  bool // true = chunk cuối của stream, AI worker đóng nhận dạng sau chunk này
 }

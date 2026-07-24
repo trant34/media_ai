@@ -98,7 +98,6 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 		ChunkMs:       c.cfg.ChunkMs,
 		SessionID:     sess.ID,
 		StreamID:      streamID,
-		StartMs:       time.Now().UnixMilli(),
 		PCMDumpDir:    c.cfg.PCMDumpDir,
 	}
 	if err := c.pool.RegisterSession(sess.Ctx, poolCfg, sess.AudioQueue); err != nil {
@@ -204,8 +203,8 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 				"seq", r.Seq,
 				"confidence", r.Confidence,
 				"language", r.Language,
-				"start_ms", r.StartMs,
-				"end_ms", r.EndMs,
+				"ts_start", r.TsStart,
+				"ts_end", r.TsEnd,
 			)
 			_ = c.dispatcher.Push(sess.Ctx, r)
 		}
@@ -213,12 +212,13 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 }
 
 // UpdateCallbackSink thay thế HTTP callback sink của session.
+// Nếu newURL rỗng, sink hiện tại được giữ nguyên (không override bằng nil).
 // Trả về sink mới (hoặc nil nếu newURL rỗng) để caller đăng ký vào metrics.
 func (c *Coordinator) UpdateCallbackSink(sessID, newURL string) *result.HTTPCallbackSink {
-	var cbSink *result.HTTPCallbackSink
-	if newURL != "" {
-		cbSink = c.newCallbackSink(newURL)
+	if newURL == "" {
+		return nil
 	}
+	cbSink := c.newCallbackSink(newURL)
 	c.dispatcher.ReplaceHTTPSink(sessID, cbSink)
 	return cbSink
 }

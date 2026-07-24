@@ -32,8 +32,8 @@ type DCMessage struct {
 	SessionID  string  `json:"session_id"`
 	Text       string  `json:"text"`
 	IsFinal    bool    `json:"is_final"`
-	StartMs    int64   `json:"start_ms"`
-	EndMs      int64   `json:"end_ms"`
+	TsStart    int64   `json:"ts_start"`
+	TsEnd      int64   `json:"ts_end"`
 	Confidence float32 `json:"confidence,omitempty"`
 	Language   string  `json:"language,omitempty"`
 	Seq        uint64  `json:"seq"`
@@ -96,8 +96,8 @@ func (s *DataChannelSink) Send(_ context.Context, r pipeline.RecognitionResult) 
 		SessionID:  r.SessionID,
 		Text:       r.Text,
 		IsFinal:    r.IsFinal,
-		StartMs:    r.StartMs,
-		EndMs:      r.EndMs,
+		TsStart:    r.TsStart,
+		TsEnd:      r.TsEnd,
 		Confidence: r.Confidence,
 		Language:   r.Language,
 		Seq:        r.Seq,

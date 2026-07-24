@@ -28,7 +28,6 @@ func defaultSessionCfg(id string) SessionConfig {
 		ChunkMs:       20,
 		SessionID:     id,
 		StreamID:      "stream-1",
-		StartMs:       0,
 	}
 }
 
@@ -213,7 +212,7 @@ func TestProcess_PCMU20ms_ProducesChunk(t *testing.T) {
 	}
 }
 
-func TestProcess_MultiplePackets_TimestampsMonotonic(t *testing.T) {
+func TestProcess_MultiplePackets_RTPTimestampPropagated(t *testing.T) {
 	wp := NewWorkerPool(WorkerPoolConfig{Workers: 1, QueueSize: 128})
 	out := make(chan AudioChunk, 32)
 	_ = wp.RegisterSession(context.Background(), defaultSessionCfg("s1"), out)
@@ -222,9 +221,21 @@ func TestProcess_MultiplePackets_TimestampsMonotonic(t *testing.T) {
 	defer cancel()
 	go wp.Run(ctx)
 
+	// Gửi 5 packet với RTP timestamp tăng dần (160 samples/packet @ 8kHz).
 	const n = 5
 	for i := 0; i < n; i++ {
-		if err := wp.Submit(context.Background(), makeJob("s1")); err != nil {
+		job := AudioJob{
+			SessionID: "s1",
+			Packet: MediaPacket{
+				SessionID:  "s1",
+				Codec:      "PCMU",
+				SampleRate: 8000,
+				Channels:   1,
+				Timestamp:  uint32(i * 160),
+				Payload:    pcmuPayload(160),
+			},
+		}
+		if err := wp.Submit(context.Background(), job); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -242,11 +253,9 @@ func TestProcess_MultiplePackets_TimestampsMonotonic(t *testing.T) {
 	if len(chunks) < n {
 		t.Fatalf("want %d chunks, got %d", n, len(chunks))
 	}
-	for i := 1; i < len(chunks); i++ {
-		if chunks[i].TimestampMs <= chunks[i-1].TimestampMs {
-			t.Errorf("timestamp not monotonic: chunk[%d]=%d <= chunk[%d]=%d",
-				i, chunks[i].TimestampMs, i-1, chunks[i-1].TimestampMs)
-		}
+	// Chunk đầu tiên phải có RTPTimestamp = 0 (packet đầu tiên).
+	if chunks[0].RTPTimestamp != 0 {
+		t.Errorf("chunk[0].RTPTimestamp = %d, want 0", chunks[0].RTPTimestamp)
 	}
 }
 

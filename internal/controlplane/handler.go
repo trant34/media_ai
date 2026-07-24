@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,12 +22,19 @@ import (
 // notifyEvent handles POST /v1/vonras/call-sessions/:callId/notify-event.
 // Dispatches on sessionEvent.event: BEGIN → 200 OK; ANSWER → create session + allocate RTP port.
 func (s *Server) notifyEvent(c *gin.Context) {
+	if slog.Default().Enabled(c.Request.Context(), slog.LevelDebug) {
+		raw, _ := io.ReadAll(c.Request.Body)
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		slog.Debug("dcsf→dcas: notify-event raw", "call_id", c.Param("callId"), "body", string(raw))
+	}
+
 	var event SessionEvent
 	if err := c.ShouldBindJSON(&event); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
 		return
 	}
 	callID := c.Param("callId")
+	slog.Debug("dcsf→dcas: notify-event", "call_id", callID, "event", event.Event, "service", event.SelectedService, "callback_url", event.CallbackURL)
 	switch strings.ToUpper(event.Event) {
 	case "BEGIN":
 		c.JSON(http.StatusOK, gin.H{})
@@ -55,11 +63,12 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 	tcoreID := callID + "-tcore"
 	taccessID := callID + "-taccess"
 	baseCfg := session.SessionConfig{
-		SourceType: "raw_rtp",
-		Codec:      codec,
-		SampleRate: sampleRate,
-		Channels:   1,
-		Task:       event.SelectedService,
+		SourceType:  "raw_rtp",
+		Codec:       codec,
+		SampleRate:  sampleRate,
+		Channels:    1,
+		Task:        event.SelectedService,
+		CallbackURL: s.cfg.ResultCallbackURL,
 	}
 
 	baseCfg.ID = tcoreID
@@ -151,23 +160,6 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		s.RegisterCallbackSink(cbSink2)
 	}
 
-	if event.CallbackURL != "" {
-		timeout := s.cfg.DCSFCallControlTimeout
-		if timeout == 0 {
-			timeout = 30 * time.Second
-		}
-		cctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
-		defer cancel()
-		ctrlResultURL := s.cfg.PublicURL + "/v1/vonras/call-sessions/" + callID + "/ctrl-result"
-		if err := s.dcsfPool.SendCallControl(cctx, event.CallbackURL, callID, event.SelectedService, ctrlResultURL); err != nil {
-			slog.Warn("call-control failed, releasing session", "call_id", callID, "err", err)
-			s.sessionMgr.Close(tcoreID)
-			s.sessionMgr.Close(taccessID)
-			c.JSON(http.StatusBadGateway, ErrorResponse{Error: "call-control: " + err.Error()})
-			return
-		}
-	}
-
 	resp := sessionToResponse(sessTCore)
 	resp.SessionID = callID
 	resp.GatewayID = s.cfg.GatewayID
@@ -178,7 +170,27 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		resp.TCoreLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, tcorePort, 0)
 		resp.TAccessLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, taccessPort, 0)
 	}
-	c.JSON(http.StatusCreated, resp)
+	slog.Debug("dcas→dcsf: answer ack", "call_id", callID, "rtp_ip", resp.RTPIP, "tcore_rtp_port", resp.TCoreRTPPort, "taccess_rtp_port", resp.TAccessRTPPort)
+	c.JSON(http.StatusOK, resp)
+	c.Writer.Flush()
+
+	if event.CallbackURL != "" {
+		timeout := s.cfg.DCSFCallControlTimeout
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
+		ctrlResultURL := s.cfg.PublicURL + "/v1/vonras/call-sessions/" + callID + "/ctrl-result"
+		slog.Debug("dcas→dcsf: call-control", "call_id", callID, "target", event.CallbackURL, "service", event.SelectedService, "ctrl_result_url", ctrlResultURL)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, event.SelectedService, ctrlResultURL); err != nil {
+				slog.Warn("call-control failed, releasing session", "call_id", callID, "err", err)
+				s.sessionMgr.Close(tcoreID)
+				s.sessionMgr.Close(taccessID)
+			}
+		}()
+	}
 }
 
 // serviceToCodec maps DCSF selectedService to codec + sampleRate.
@@ -212,14 +224,30 @@ func (s *Server) getCallSession(c *gin.Context) {
 // ctrlResult handles POST /v1/vonras/call-sessions/:callId/ctrl-result.
 // Updates mediaResources and per-termination callbackUrl for both tcore and taccess sessions.
 func (s *Server) ctrlResult(c *gin.Context) {
+	if slog.Default().Enabled(c.Request.Context(), slog.LevelDebug) {
+		raw, _ := io.ReadAll(c.Request.Body)
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		slog.Debug("dcsf→dcas: ctrl-result raw", "call_id", c.Param("callId"), "body", string(raw))
+	}
+
 	var req CtrlResultRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
 		return
 	}
 	id := c.Param("callId")
+	slog.Debug("dcsf→dcas: ctrl-result", "call_id", id, "has_media_resources", req.MediaResources != nil)
 
 	if req.MediaResources != nil {
+		slog.Debug("dcsf→dcas: ctrl-result media", "call_id", id,
+			"tcore_ctx", req.MediaResources.TCore.ContextID,
+			"tcore_term", req.MediaResources.TCore.Termination.TerminationID,
+			"tcore_callback", req.MediaResources.TCore.CallbackURL,
+			"taccess_ctx", req.MediaResources.TAccess.ContextID,
+			"taccess_term", req.MediaResources.TAccess.Termination.TerminationID,
+			"taccess_callback", req.MediaResources.TAccess.CallbackURL,
+		)
+
 		tcorePatch := session.SessionPatch{
 			CallbackURL: req.MediaResources.TCore.CallbackURL,
 			MediaResources: &pipeline.MediaResources{
@@ -268,6 +296,7 @@ func (s *Server) ctrlResult(c *gin.Context) {
 // Closes both {callId}-tcore and {callId}-taccess sessions.
 func (s *Server) deleteCallSession(c *gin.Context) {
 	callID := c.Param("callId")
+	slog.Debug("dcsf→dcas: delete call-session", "call_id", callID)
 	closedCore := s.sessionMgr.Close(callID + "-tcore")
 	closedAccess := s.sessionMgr.Close(callID + "-taccess")
 	if !closedCore && !closedAccess {
@@ -422,18 +451,6 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE media_ai_ai_reconnects_total counter\n")
 	fmt.Fprintf(w, "media_ai_ai_reconnects_total %d\n", aiSt.TotalRetries)
 
-	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_last_ms Latency of the most recently received result (audio end_ms to gateway recv, ms)\n")
-	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_last_ms gauge\n")
-	fmt.Fprintf(w, "media_ai_ai_result_latency_last_ms %d\n", aiSt.LatencyLast)
-
-	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_ms_total Cumulative sum of result latencies (ms); divide by count for average\n")
-	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_ms_total counter\n")
-	fmt.Fprintf(w, "media_ai_ai_result_latency_ms_total %d\n", aiSt.LatencySum)
-
-	fmt.Fprintf(w, "# HELP media_ai_ai_result_latency_count_total Number of results with valid latency measurement (end_ms set by AI)\n")
-	fmt.Fprintf(w, "# TYPE media_ai_ai_result_latency_count_total counter\n")
-	fmt.Fprintf(w, "media_ai_ai_result_latency_count_total %d\n", aiSt.LatencyCount)
-
 	fmt.Fprintf(w, "# HELP media_ai_ai_first_result_ms_total Cumulative sum of first-result latencies per stream (ms)\n")
 	fmt.Fprintf(w, "# TYPE media_ai_ai_first_result_ms_total counter\n")
 	fmt.Fprintf(w, "media_ai_ai_first_result_ms_total %d\n", aiSt.LatencyFirstSum)
@@ -577,9 +594,6 @@ func (s *Server) connections(c *gin.Context) {
 				State:        s.grpcPool.State(addr).String(),
 				ActiveStream: s.aiMgr.Count(),
 				Latency: AILatencyStats{
-					LastMs:           aiSt.LatencyLast,
-					AvgMs:            aiSt.AvgLatencyMs(),
-					Count:            aiSt.LatencyCount,
 					AvgFirstResultMs: aiSt.AvgFirstResultMs(),
 				},
 			})

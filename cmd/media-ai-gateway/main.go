@@ -210,6 +210,10 @@ func main() {
 	}
 	go mon.Run(ctx)
 
+	if cfg.AI.GRPCTarget != "" {
+		go grpcPool.WatchAndReconnect(ctx, cfg.AI.GRPCTarget)
+	}
+
 	go pool.Run(ctx)
 	go disp.Run(ctx)
 	go sessMgr.Run(ctx)
@@ -288,6 +292,9 @@ func buildLogger(level string) *slog.Logger {
 		fmt.Fprintf(os.Stderr, "unknown log level %q, using info\n", level)
 		l = slog.LevelInfo
 	}
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l})
+	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level:     l,
+		AddSource: true,
+	})
 	return slog.New(h)
 }
