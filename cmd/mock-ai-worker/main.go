@@ -15,12 +15,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
 	"net"
 	"os"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/keepalive"
@@ -256,11 +257,11 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 				language = "vi"
 			}
 			startRTPTs = chunk.RTPTimestamp
-			slog.Info("stream opened",
-				"session_id", sessionID,
-				"stream_id", streamID,
-				"language", language,
-				"task", chunk.Task,
+			zap.L().Info("stream opened",
+				zap.String("session_id", sessionID),
+				zap.String("stream_id", streamID),
+				zap.String("language", language),
+				zap.String("task", chunk.Task),
 			)
 		}
 		chunkCount++
@@ -281,7 +282,7 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			if err := stream.SendMsg(partial); err != nil {
 				return err
 			}
-			slog.Debug("sent partial", "session_id", sessionID, "seq", seq, "text", partial.Text)
+			zap.L().Debug("sent partial", zap.String("session_id", sessionID), zap.Uint64("seq", seq), zap.String("text", partial.Text))
 		}
 
 		if chunkCount%6 == 0 {
@@ -300,11 +301,11 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			if err := stream.SendMsg(final); err != nil {
 				return err
 			}
-			slog.Info("sent final",
-				"session_id", sessionID,
-				"seq", seq,
-				"text", final.Text,
-				"chunks", chunkCount,
+			zap.L().Info("sent final",
+				zap.String("session_id", sessionID),
+				zap.Uint64("seq", seq),
+				zap.String("text", final.Text),
+				zap.Uint64("chunks", chunkCount),
 			)
 			startRTPTs = chunk.RTPTimestamp
 		}
@@ -325,19 +326,19 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 			if err := stream.SendMsg(final); err != nil {
 				return err
 			}
-			slog.Info("stream closed (end_of_stream)",
-				"session_id", sessionID,
-				"total_chunks", chunkCount,
-				"total_seq", seq,
+			zap.L().Info("stream closed (end_of_stream)",
+				zap.String("session_id", sessionID),
+				zap.Uint64("total_chunks", chunkCount),
+				zap.Uint64("total_seq", seq),
 			)
 			return nil
 		}
 	}
 
-	slog.Info("stream closed (client EOF)",
-		"session_id", sessionID,
-		"total_chunks", chunkCount,
-		"total_seq", seq,
+	zap.L().Info("stream closed (client EOF)",
+		zap.String("session_id", sessionID),
+		zap.Uint64("total_chunks", chunkCount),
+		zap.Uint64("total_seq", seq),
 	)
 	return nil
 }
@@ -349,15 +350,27 @@ func main() {
 	logLevel := flag.String("log-level", envOr("MOCK_AI_LOG", "info"), "debug|info|warn|error")
 	flag.Parse()
 
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(*logLevel)); err != nil {
-		l = slog.LevelInfo
+	zapLevel := zapcore.InfoLevel
+	switch *logLevel {
+	case "debug":
+		zapLevel = zapcore.DebugLevel
+	case "warn":
+		zapLevel = zapcore.WarnLevel
+	case "error":
+		zapLevel = zapcore.ErrorLevel
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l})))
+	zapCfg := zap.NewProductionConfig()
+	zapCfg.Level = zap.NewAtomicLevelAt(zapLevel)
+	logger, err := zapCfg.Build()
+	if err != nil {
+		panic(err)
+	}
+	defer logger.Sync() //nolint:errcheck
+	zap.ReplaceGlobals(logger)
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
-		slog.Error("listen failed", "addr", *addr, "err", err)
+		zap.L().Error("listen failed", zap.String("addr", *addr), zap.Error(err))
 		os.Exit(1)
 	}
 
@@ -381,9 +394,9 @@ func main() {
 		},
 	}, struct{}{})
 
-	slog.Info("mock-ai-worker listening", "addr", *addr)
+	zap.L().Info("mock-ai-worker listening", zap.String("addr", *addr))
 	if err := srv.Serve(ln); err != nil {
-		slog.Error("serve error", "err", err)
+		zap.L().Error("serve error", zap.Error(err))
 		os.Exit(1)
 	}
 }

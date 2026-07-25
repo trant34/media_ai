@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"media-ai-gateway/internal/pipeline"
 )
 
@@ -140,7 +140,7 @@ func (s *Stream) runWithReconnect(
 		attempt := s.retries
 		s.mu.Unlock()
 
-		slog.Debug("ai: reconnecting", "session_id", sessionID, "attempt", attempt, "backoff", backoff, "error", pairErr)
+		zap.L().Debug("ai: reconnecting", zap.String("session_id", sessionID), zap.Int("attempt", attempt), zap.Duration("backoff", backoff), zap.Error(pairErr))
 
 		s.clearErr()
 
@@ -263,7 +263,7 @@ func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-cha
 			return
 		case <-firstChunkTimer:
 			s.setErr(ErrFirstChunkTimeout)
-			slog.Debug("ai: first chunk timeout", "session_id", s.SessionID, "stream_id", s.StreamID, "timeout", s.cfg.FirstChunkTimeout)
+			zap.L().Debug("ai: first chunk timeout", zap.String("session_id", s.SessionID), zap.String("stream_id", s.StreamID), zap.Duration("timeout", s.cfg.FirstChunkTimeout))
 			return
 		case chunk, ok := <-audioIn:
 			if !ok {
@@ -274,10 +274,18 @@ func (s *Stream) runSend(ctx context.Context, client StreamClient, audioIn <-cha
 				if !isCtxErr(err) {
 					s.sendErrors.Add(1)
 					s.setErr(err)
-					slog.Debug("ai: send error to worker", "session_id", s.SessionID, "stream_id", s.StreamID, "error", err)
+					zap.L().Debug("ai: send error to worker", zap.String("session_id", s.SessionID), zap.String("stream_id", s.StreamID), zap.Error(err))
 				}
 				return
 			}
+			zap.L().Debug("ai: chunk sent",
+				zap.String("session_id",  s.SessionID),
+				zap.String("stream_id",   s.StreamID),
+				zap.Uint32("rtp_ts",      chunk.RTPTimestamp),
+				zap.Int64("duration_ms",  chunk.DurationMs),
+				zap.Int("pcm_bytes",      len(chunk.PCM)),
+				zap.Bool("end_of_stream", chunk.EndOfStream),
+			)
 			if chunk.EndOfStream {
 				s.endOfStreamSent.Store(true)
 			}
@@ -323,11 +331,11 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 				if err != io.EOF {
 					s.recvErrors.Add(1)
 					s.setErr(err)
-					slog.Debug("ai: recv error from worker", "session_id", s.SessionID, "stream_id", s.StreamID, "error", err)
+					zap.L().Debug("ai: recv error from worker", zap.String("session_id", s.SessionID), zap.String("stream_id", s.StreamID), zap.Error(err))
 				} else if !s.endOfStreamSent.Load() {
 					s.recvErrors.Add(1)
 					s.setErr(ErrUnexpectedEOF)
-					slog.Debug("ai: unexpected EOF from worker", "session_id", s.SessionID, "stream_id", s.StreamID)
+					zap.L().Debug("ai: unexpected EOF from worker", zap.String("session_id", s.SessionID), zap.String("stream_id", s.StreamID))
 				}
 			}
 			return
@@ -337,9 +345,9 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 
 		// First-result latency (stream open → first result).
 		if s.firstResultMs.CompareAndSwap(0, now-s.OpenedAt.UnixMilli()) {
-			slog.Debug("ai: first result received",
-				"session_id", s.SessionID,
-				"first_result_ms", now-s.OpenedAt.UnixMilli(),
+			zap.L().Debug("ai: first result received",
+				zap.String("session_id", s.SessionID),
+				zap.Int64("first_result_ms", now-s.OpenedAt.UnixMilli()),
 			)
 		}
 

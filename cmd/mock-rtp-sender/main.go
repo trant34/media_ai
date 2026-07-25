@@ -18,12 +18,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	pionrtp "github.com/pion/rtp"
 )
 
@@ -173,22 +174,34 @@ func main() {
 	logLevel   := flag.String("log-level",   "info",  "debug|info|warn|error")
 	flag.Parse()
 
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(*logLevel)); err != nil {
-		lvl = slog.LevelInfo
+	zapLevel := zapcore.InfoLevel
+	switch *logLevel {
+	case "debug":
+		zapLevel = zapcore.DebugLevel
+	case "warn":
+		zapLevel = zapcore.WarnLevel
+	case "error":
+		zapLevel = zapcore.ErrorLevel
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+	zapCfg := zap.NewProductionConfig()
+	zapCfg.Level = zap.NewAtomicLevelAt(zapLevel)
+	logger, err := zapCfg.Build()
+	if err != nil {
+		panic(err)
+	}
+	defer logger.Sync() //nolint:errcheck
+	zap.ReplaceGlobals(logger)
 
 	if *target == "" {
-		slog.Error("--target là bắt buộc")
+		zap.L().Error("--target là bắt buộc")
 		os.Exit(1)
 	}
 	if *filePath == "" {
-		slog.Error("--file là bắt buộc")
+		zap.L().Error("--file là bắt buộc")
 		os.Exit(1)
 	}
 	if *pt > 127 {
-		slog.Error("--pt phải trong khoảng 0–127")
+		zap.L().Error("--pt phải trong khoảng 0–127")
 		os.Exit(1)
 	}
 
@@ -197,7 +210,7 @@ func main() {
 
 	f, err := os.Open(*filePath)
 	if err != nil {
-		slog.Error("mở file thất bại", "file", *filePath, "err", err)
+		zap.L().Error("mở file thất bại", zap.String("file", *filePath), zap.Error(err))
 		os.Exit(1)
 	}
 	defer f.Close()
@@ -208,7 +221,7 @@ func main() {
 	case "amrwb", "amrnb":
 		r, rErr := newAMRReader(f, fileFmt)
 		if rErr != nil {
-			slog.Error("khởi tạo AMR reader thất bại", "err", rErr)
+			zap.L().Error("khởi tạo AMR reader thất bại", zap.Error(rErr))
 			os.Exit(1)
 		}
 		reader = r
@@ -217,12 +230,12 @@ func main() {
 		if fs == 0 {
 			fs, err = autoFrameSize(*codec, *sampleRate, *ptimeMs)
 			if err != nil {
-				slog.Error("không xác định được frame size", "err", err)
+				zap.L().Error("không xác định được frame size", zap.Error(err))
 				os.Exit(1)
 			}
 		}
 		if fs <= 0 {
-			slog.Error("frame size phải > 0", "frame_size", fs)
+			zap.L().Error("frame size phải > 0", zap.Int("frame_size", fs))
 			os.Exit(1)
 		}
 		reader = newRawReader(f, fs)
@@ -232,21 +245,21 @@ func main() {
 
 	conn, err := net.Dial("udp", *target)
 	if err != nil {
-		slog.Error("dial UDP thất bại", "target", *target, "err", err)
+		zap.L().Error("dial UDP thất bại", zap.String("target", *target), zap.Error(err))
 		os.Exit(1)
 	}
 	defer conn.Close()
 
-	slog.Info("mock-rtp-sender khởi động",
-		"codec", *codec,
-		"file_format", fileFmt,
-		"pt", *pt,
-		"ssrc", *ssrc,
-		"ptime_ms", *ptimeMs,
-		"ts_incr", tsIncr,
-		"target", *target,
-		"file", *filePath,
-		"loop", *loop,
+	zap.L().Info("mock-rtp-sender khởi động",
+		zap.String("codec", *codec),
+		zap.String("file_format", fileFmt),
+		zap.Uint("pt", *pt),
+		zap.Uint("ssrc", *ssrc),
+		zap.Int("ptime_ms", *ptimeMs),
+		zap.Uint32("ts_incr", tsIncr),
+		zap.String("target", *target),
+		zap.String("file", *filePath),
+		zap.Bool("loop", *loop),
 	)
 
 	seq      := uint16(*seqStart) //nolint:gosec
@@ -266,14 +279,14 @@ func main() {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 				if *loop {
 					if rewErr := reader.rewind(); rewErr != nil {
-						slog.Error("rewind thất bại", "err", rewErr)
+						zap.L().Error("rewind thất bại", zap.Error(rewErr))
 						break
 					}
 					continue
 				}
 				break // hết file
 			}
-			slog.Error("đọc frame thất bại", "err", readErr)
+			zap.L().Error("đọc frame thất bại", zap.Error(readErr))
 			break
 		}
 		if payload == nil {
@@ -300,12 +313,12 @@ func main() {
 
 		raw, marshalErr := pkt.Marshal()
 		if marshalErr != nil {
-			slog.Error("marshal RTP thất bại", "err", marshalErr)
+			zap.L().Error("marshal RTP thất bại", zap.Error(marshalErr))
 			break
 		}
 
 		if _, writeErr := conn.Write(raw); writeErr != nil {
-			slog.Error("gửi UDP thất bại", "err", writeErr)
+			zap.L().Error("gửi UDP thất bại", zap.Error(writeErr))
 			break
 		}
 
@@ -314,7 +327,7 @@ func main() {
 		sent++
 
 		if sent%50 == 0 {
-			slog.Info("tiến độ", "sent", sent, "seq", seq-1, "ts", ts-tsIncr)
+			zap.L().Info("tiến độ", zap.Int("sent", sent), zap.Uint16("seq", seq-1), zap.Uint32("ts", ts-tsIncr))
 		}
 
 		next = next.Add(interval)
@@ -323,7 +336,7 @@ func main() {
 		}
 	}
 
-	slog.Info("hoàn thành", "packets_sent", sent, "frames_skipped", skipped)
+	zap.L().Info("hoàn thành", zap.Int("packets_sent", sent), zap.Int("frames_skipped", skipped))
 }
 
 // resolveFileFormat xác định file format từ --file-format và --codec.

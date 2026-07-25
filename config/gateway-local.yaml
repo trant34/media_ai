@@ -3,6 +3,7 @@ gateway:
   id: "gw-local"
   raw_rtp_enabled: true
   webrtc_enabled: true
+  mock_result_pump: false  # đổi thành true để test luồng callback MF không cần AI worker
 
 server:
   http_addr: ":8080"

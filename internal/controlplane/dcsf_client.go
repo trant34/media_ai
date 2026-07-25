@@ -6,12 +6,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"sync"
 
+	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
 
@@ -72,16 +72,16 @@ func (p *DCSFPool) Preconnect(ctx context.Context) {
 		target := "http://" + addr + "/"
 		req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
 		if err != nil {
-			slog.Warn("dcsf: preconnect: build request failed", "addr", addr, "err", err)
+			zap.L().Warn("dcsf: preconnect: build request failed", zap.String("addr", addr), zap.Error(err))
 			continue
 		}
 		resp, err := clients[addr].Do(req)
 		if err != nil {
-			slog.Warn("dcsf: preconnect failed — will retry on first call-control", "addr", addr, "err", err)
+			zap.L().Warn("dcsf: preconnect failed — will retry on first call-control", zap.String("addr", addr), zap.Error(err))
 			continue
 		}
 		resp.Body.Close()
-		slog.Info("dcsf: preconnected via HTTP/2", "addr", addr, "status", resp.StatusCode)
+		zap.L().Info("dcsf: preconnected via HTTP/2", zap.String("addr", addr), zap.Int("status", resp.StatusCode))
 	}
 }
 
@@ -113,7 +113,7 @@ func (p *DCSFPool) clientFor(rawURL string) *http.Client {
 	}
 	c = newDCSFHTTPClient()
 	p.clients[host] = c
-	slog.Info("dcsf: new pool created for host", "host", host)
+	zap.L().Info("dcsf: new pool created for host", zap.String("host", host))
 	return c
 }
 
@@ -147,6 +147,6 @@ func (p *DCSFPool) SendCallControl(ctx context.Context, dcsfURL, callID, service
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("dcsf: call-control status %d", resp.StatusCode)
 	}
-	slog.Debug("dcas→dcsf: call-control OK", "call_id", callID, "url", dcsfURL, "status", resp.StatusCode)
+	zap.L().Debug("dcas→dcsf: call-control OK", zap.String("call_id", callID), zap.String("url", dcsfURL), zap.Int("status", resp.StatusCode))
 	return nil
 }

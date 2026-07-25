@@ -44,6 +44,7 @@ const defaultRegistryTTL = 30 * time.Second
 type Starter interface {
 	Start(sess *session.Session) (*result.HTTPCallbackSink, error)
 	UpdateCallbackSink(sessID, newURL string) *result.HTTPCallbackSink
+	StartMockResultPump(sess *session.Session, terminationID string)
 }
 
 // ServerConfig cấu hình HTTP/2 control plane.
@@ -87,6 +88,10 @@ type ServerConfig struct {
 	// WebRTC configures the WebRTC ingress (Pion PeerConnection, ICE servers, NAT).
 	// Used to handle POST /v1/webrtc/offer.
 	WebRTC wrtc.Config
+
+	// MockResultPump bật giả lập ASR result 1s/lần sau khi nhận ctrl-result.
+	// Chỉ dùng cho môi trường test/lab; tắt trong production.
+	MockResultPump bool
 }
 
 // DefaultServerConfig trả về cấu hình mặc định (h2c, port 8080).

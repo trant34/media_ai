@@ -1,14 +1,14 @@
 package controlplane
 
 import (
-	"log/slog"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
-// ginLogger là middleware ghi log mỗi HTTP request bằng slog.
-// Level: DEBUG cho 2xx/3xx, WARN cho 4xx, ERROR cho 5xx.
+// ginLogger logs each HTTP request via zap.
+// Level: DEBUG for 2xx/3xx, WARN for 4xx, ERROR for 5xx.
 func ginLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -22,28 +22,29 @@ func ginLogger() gin.HandlerFunc {
 		latency := time.Since(start)
 		status := c.Writer.Status()
 
-		attrs := []any{
-			"method",     c.Request.Method,
-			"path",       path,
-			"status",     status,
-			"latency_ms", latency.Milliseconds(),
-			"ip",         c.ClientIP(),
-			"bytes",      c.Writer.Size(),
-		}
+		fields := make([]zap.Field, 0, 8)
+		fields = append(fields,
+			zap.String("method",     c.Request.Method),
+			zap.String("path",       path),
+			zap.Int("status",        status),
+			zap.Int64("latency_ms",  latency.Milliseconds()),
+			zap.String("ip",         c.ClientIP()),
+			zap.Int("bytes",         c.Writer.Size()),
+		)
 		if id := c.GetHeader("X-Request-ID"); id != "" {
-			attrs = append(attrs, "request_id", id)
+			fields = append(fields, zap.String("request_id", id))
 		}
 		if err := c.Errors.ByType(gin.ErrorTypePrivate).String(); err != "" {
-			attrs = append(attrs, "error", err)
+			fields = append(fields, zap.String("error", err))
 		}
 
 		switch {
 		case status >= 500:
-			slog.Error("http request", attrs...)
+			zap.L().Error("http request", fields...)
 		case status >= 400:
-			slog.Warn("http request", attrs...)
+			zap.L().Warn("http request", fields...)
 		default:
-			slog.Debug("http request", attrs...)
+			zap.L().Debug("http request", fields...)
 		}
 	}
 }

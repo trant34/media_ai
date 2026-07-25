@@ -32,13 +32,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"media-ai-gateway/internal/ai"
 	"media-ai-gateway/internal/config"
@@ -68,7 +70,8 @@ func main() {
 	workers      := flag.Int("workers",            16,    "Audio pipeline worker pool size")
 	maxSess      := flag.Int("max-sess",           10000, "Maximum concurrent sessions")
 	logLevel     := flag.String("log-level",       "info","Log level: debug|info|warn|error")
-	pcmDumpDir  := flag.String("pcm-dump-dir",    envOr("GATEWAY_PCM_DUMP_DIR", ""), "Directory for raw PCM debug dumps (empty = disabled)")
+	pcmDumpDir      := flag.String("pcm-dump-dir",      envOr("GATEWAY_PCM_DUMP_DIR",      ""),      "Directory for raw PCM debug dumps (empty = disabled)")
+	mockResultPump  := flag.Bool("mock-result-pump",    false,                                         "Enable mock ASR result pump every 1s (test/lab only)")
 	flag.Parse()
 
 	// ── config ─────────────────────────────────────────────────────────────
@@ -99,24 +102,26 @@ func main() {
 		if *pcmDumpDir != "" {
 			cfg.Audio.PCMDumpDir = *pcmDumpDir
 		}
+		cfg.Gateway.MockResultPump = *mockResultPump
 	}
 
 	// ── logger ─────────────────────────────────────────────────────────────
-	logger := buildLogger(cfg.Log.Level)
-	slog.SetDefault(logger)
+	logger := buildZapLogger(cfg.Log.Level)
+	zap.ReplaceGlobals(logger)
+	defer logger.Sync() //nolint:errcheck
 
-	slog.Info("media-ai-gateway starting",
-		"http_addr",      cfg.Server.HTTPAddr,
-		"rtp_addr",       cfg.RTP.ListenAddr,
-		"gateway_id",     cfg.Gateway.ID,
-		"rtp_public_ip",  cfg.RTP.PublicIP,
-		"rtp_port_range", [2]int{cfg.RTP.PortStart, cfg.RTP.PortEnd},
-		"chunk_ms",       cfg.Audio.ChunkMs,
-		"out_rate",       cfg.Audio.OutputSampleRate,
-		"workers",        cfg.Pipeline.AudioWorkerCount,
-		"max_sess",       cfg.Session.MaxSessions,
-		"tls",            cfg.Server.CertFile != "",
-		"h2c",            cfg.Server.CertFile == "",
+	zap.L().Info("media-ai-gateway starting",
+		zap.String("http_addr",      cfg.Server.HTTPAddr),
+		zap.String("rtp_addr",       cfg.RTP.ListenAddr),
+		zap.String("gateway_id",     cfg.Gateway.ID),
+		zap.String("rtp_public_ip",  cfg.RTP.PublicIP),
+		zap.Ints("rtp_port_range",   []int{cfg.RTP.PortStart, cfg.RTP.PortEnd}),
+		zap.Int("chunk_ms",          cfg.Audio.ChunkMs),
+		zap.Int("out_rate",          cfg.Audio.OutputSampleRate),
+		zap.Int("workers",           cfg.Pipeline.AudioWorkerCount),
+		zap.Int("max_sess",          cfg.Session.MaxSessions),
+		zap.Bool("tls",              cfg.Server.CertFile != ""),
+		zap.Bool("h2c",              cfg.Server.CertFile == ""),
 	)
 
 	// ── components ─────────────────────────────────────────────────────────
@@ -143,15 +148,15 @@ func main() {
 		aiDialer = ai.NewRoutingDialer(workerReg, grpcPool.DialFunc())
 		// Pre-connect ngay khi khởi động — trigger async TCP dial, không block.
 		grpcPool.Preconnect(cfg.AI.GRPCTarget)
-		slog.Info("AI routing dialer active",
-			"target",            cfg.AI.GRPCTarget,
-			"keepalive_time",    kaTime,
-			"keepalive_timeout", kaTimeout,
+		zap.L().Info("AI routing dialer active",
+			zap.String("target",            cfg.AI.GRPCTarget),
+			zap.Duration("keepalive_time",    kaTime),
+			zap.Duration("keepalive_timeout", kaTimeout),
 		)
 	} else {
 		// Dev/smoke-test mode: pipeline chạy đầy đủ nhưng không có transcript.
 		aiDialer = ai.NullDialer{}
-		slog.Warn("AI grpc_target not configured — using NullDialer, no transcripts will be generated")
+		zap.L().Warn("AI grpc_target not configured — using NullDialer, no transcripts will be generated")
 	}
 	aiMgr := ai.NewManager(cfg.ToAIConfig(), aiDialer)
 
@@ -178,7 +183,7 @@ func main() {
 		preCtx, preCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		dcsfPool.Preconnect(preCtx)
 		preCancel()
-		slog.Info("DCSF pool initialized", "hosts", len(cfg.DCSF.Hosts))
+		zap.L().Info("DCSF pool initialized", zap.Int("hosts", len(cfg.DCSF.Hosts)))
 	}
 
 	apiSrv := controlplane.NewServer(cfg.ToControlPlaneServerConfig(), sessMgr, coord, pool, aiMgr, disp)
@@ -219,9 +224,9 @@ func main() {
 	go sessMgr.Run(ctx)
 
 	go func() {
-		slog.Info("RTP ingress listening", "addr", cfg.RTP.ListenAddr)
+		zap.L().Info("RTP ingress listening", zap.String("addr", cfg.RTP.ListenAddr))
 		if err := rtpIngress.Run(ctx); err != nil {
-			slog.Error("RTP ingress error", "err", err)
+			zap.L().Error("RTP ingress error", zap.Error(err))
 			stop()
 		}
 	}()
@@ -237,24 +242,24 @@ func main() {
 		if cfg.Server.CertFile != "" {
 			mode = "tls+h2"
 		}
-		slog.Info("HTTP/2 control plane listening", "addr", cfg.Server.HTTPAddr, "mode", mode)
+		zap.L().Info("HTTP/2 control plane listening", zap.String("addr", cfg.Server.HTTPAddr), zap.String("mode", mode))
 		httpDone <- apiSrv.ListenAndServe(ctx)
 	}()
 
 	// ── shutdown ───────────────────────────────────────────────────────────
 	<-ctx.Done()
-	slog.Info("signal received, shutting down")
+	zap.L().Info("signal received, shutting down")
 
 	select {
 	case err := <-httpDone:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("HTTP server exit error", "err", err)
+			zap.L().Error("HTTP server exit error", zap.Error(err))
 		}
 	case <-time.After(15 * time.Second):
-		slog.Warn("HTTP server shutdown timed out")
+		zap.L().Warn("HTTP server shutdown timed out")
 	}
 
-	slog.Info("shutdown complete")
+	zap.L().Info("shutdown complete")
 }
 
 // serveMetrics runs a minimal HTTP server at addr serving only /metrics.
@@ -270,12 +275,12 @@ func serveMetrics(ctx context.Context, addr string, h http.Handler) {
 	}()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		slog.Error("metrics server listen failed", "addr", addr, "err", err)
+		zap.L().Error("metrics server listen failed", zap.String("addr", addr), zap.Error(err))
 		return
 	}
-	slog.Info("metrics server listening", "addr", addr)
+	zap.L().Info("metrics server listening", zap.String("addr", addr))
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("metrics server error", "err", err)
+		zap.L().Error("metrics server error", zap.Error(err))
 	}
 }
 
@@ -286,15 +291,18 @@ func envOr(key, def string) string {
 	return def
 }
 
-func buildLogger(level string) *slog.Logger {
-	var l slog.Level
+func buildZapLogger(level string) *zap.Logger {
+	var l zapcore.Level
 	if err := l.UnmarshalText([]byte(level)); err != nil {
 		fmt.Fprintf(os.Stderr, "unknown log level %q, using info\n", level)
-		l = slog.LevelInfo
+		l = zapcore.InfoLevel
 	}
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level:     l,
-		AddSource: true,
-	})
-	return slog.New(h)
+	cfg := zap.NewProductionConfig()
+	cfg.Level = zap.NewAtomicLevelAt(l)
+	cfg.OutputPaths = []string{"stdout"}
+	logger, err := cfg.Build()
+	if err != nil {
+		panic(fmt.Sprintf("failed to build logger: %v", err))
+	}
+	return logger
 }

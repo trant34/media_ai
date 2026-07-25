@@ -3,7 +3,8 @@ package ai
 import (
 	"context"
 	"fmt"
-	"log/slog"
+
+	"go.uber.org/zap"
 )
 
 // GRPCDialFunc mở một bidirectional gRPC stream tới AI worker tại workerAddr.
@@ -31,13 +32,13 @@ func NewRoutingDialer(registry *WorkerRegistry, dialFn GRPCDialFunc) *RoutingDia
 func (d *RoutingDialer) Dial(ctx context.Context, sessionID, streamID, language, task string) (StreamClient, error) {
 	worker, err := d.registry.Select(language, task)
 	if err != nil {
-		slog.Debug("ai: no worker available", "session_id", sessionID, "language", language, "task", task, "error", err)
+		zap.L().Debug("ai: no worker available", zap.String("session_id", sessionID), zap.String("language", language), zap.String("task", task), zap.Error(err))
 		return nil, fmt.Errorf("ai: route %s/%s: %w", language, task, err)
 	}
-	slog.Debug("ai: dialing worker", "session_id", sessionID, "worker_id", worker.ID, "worker_addr", worker.Addr, "language", language, "task", task)
+	zap.L().Debug("ai: dialing worker", zap.String("session_id", sessionID), zap.String("worker_id", worker.ID), zap.String("worker_addr", worker.Addr), zap.String("language", language), zap.String("task", task))
 	client, err := d.dialFn(ctx, worker.Addr, sessionID, streamID, language, task)
 	if err != nil {
-		slog.Debug("ai: dial failed", "session_id", sessionID, "worker_id", worker.ID, "worker_addr", worker.Addr, "error", err)
+		zap.L().Debug("ai: dial failed", zap.String("session_id", sessionID), zap.String("worker_id", worker.ID), zap.String("worker_addr", worker.Addr), zap.Error(err))
 		return nil, fmt.Errorf("ai: dial worker %s (%s): %w", worker.ID, worker.Addr, err)
 	}
 	return client, nil

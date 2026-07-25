@@ -4,6 +4,7 @@
 gateway:
   name: "media-ai-gateway-dev"
   id: "gw-dev"
+  mock_result_pump: false  # đổi thành true để test luồng callback MF mà không cần AI worker
 
 server:
   http_addr: ":8080"

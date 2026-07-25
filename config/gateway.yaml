@@ -8,6 +8,7 @@ gateway:
   id: "gw-01"                # định danh node, trả về trong mỗi CREATE response
   raw_rtp_enabled: true      # bật Raw RTP UDP ingress
   webrtc_enabled: true       # bật WebRTC ingress (Pion)
+  mock_result_pump: false    # giả lập ASR result 1s/lần (chỉ bật khi test MF, tắt trên production)
 
 # ── HTTP/2 control plane ───────────────────────────────────────────────────────
 server:

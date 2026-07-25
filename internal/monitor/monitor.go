@@ -3,8 +3,9 @@ package monitor
 
 import (
 	"context"
-	"log/slog"
 	"time"
+
+	"go.uber.org/zap"
 
 	"media-ai-gateway/internal/ai"
 	"media-ai-gateway/internal/pipeline"
@@ -19,7 +20,7 @@ type PortAllocator interface {
 	Available() int
 }
 
-// Monitor periodically logs connection info, key metrics, and AI latency via slog.
+// Monitor periodically logs connection info, key metrics, and AI latency via zap.
 // All pointer fields are optional — pass nil to skip that subsystem.
 type Monitor struct {
 	Interval       time.Duration
@@ -53,60 +54,60 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 func (m *Monitor) emit() {
-	args := make([]any, 0, 52)
+	fields := make([]zap.Field, 0, 32)
 
 	// Sessions
 	if m.SessionMgr != nil {
-		args = append(args,
-			"sessions_active", m.SessionMgr.Count(),
-			"sessions_max", m.SessionMgr.MaxSessions(),
+		fields = append(fields,
+			zap.Int("sessions_active", m.SessionMgr.Count()),
+			zap.Int("sessions_max",    m.SessionMgr.MaxSessions()),
 		)
 	}
 
 	// AI streams + latency
 	if m.AIMgr != nil {
 		st := m.AIMgr.Stats()
-		args = append(args,
-			"ai_streams_active", m.AIMgr.Count(),
-			"ai_streams_max", m.AIMgr.MaxStreams(),
-			"ai_send_errors", st.TotalSendErrors,
-			"ai_recv_errors", st.TotalRecvErrors,
-			"ai_retries", st.TotalRetries,
-			"ai_first_result_avg_ms", st.AvgFirstResultMs(),
+		fields = append(fields,
+			zap.Int("ai_streams_active",       m.AIMgr.Count()),
+			zap.Int("ai_streams_max",          m.AIMgr.MaxStreams()),
+			zap.Uint64("ai_send_errors",       st.TotalSendErrors),
+			zap.Uint64("ai_recv_errors",       st.TotalRecvErrors),
+			zap.Uint64("ai_retries",           st.TotalRetries),
+			zap.Int64("ai_first_result_avg_ms", st.AvgFirstResultMs()),
 		)
 	}
 
 	// Audio worker pool
 	if m.Pool != nil {
 		ps := m.Pool.Stats()
-		args = append(args,
-			"pool_submitted", ps.Submitted,
-			"pool_processed", ps.Processed,
-			"pool_dropped", ps.Dropped,
-			"pool_decode_errors", ps.DecodeErrors,
-			"pool_queue_len", m.Pool.QueueLen(),
+		fields = append(fields,
+			zap.Uint64("pool_submitted",     ps.Submitted),
+			zap.Uint64("pool_processed",     ps.Processed),
+			zap.Uint64("pool_dropped",       ps.Dropped),
+			zap.Uint64("pool_decode_errors", ps.DecodeErrors),
+			zap.Int("pool_queue_len",        m.Pool.QueueLen()),
 		)
 	}
 
 	// Result dispatcher
 	if m.Dispatcher != nil {
 		ds := m.Dispatcher.Stats()
-		args = append(args,
-			"disp_sent", ds.Sent,
-			"disp_sent_final", ds.SentFinal,
-			"disp_sent_partial", ds.SentPartial,
-			"disp_dropped", ds.Dropped,
-			"disp_send_errors", ds.SendErrors,
-			"disp_queue_len", m.Dispatcher.QueueLen(),
+		fields = append(fields,
+			zap.Uint64("disp_sent",         ds.Sent),
+			zap.Uint64("disp_sent_final",   ds.SentFinal),
+			zap.Uint64("disp_sent_partial", ds.SentPartial),
+			zap.Uint64("disp_dropped",      ds.Dropped),
+			zap.Uint64("disp_send_errors",  ds.SendErrors),
+			zap.Int("disp_queue_len",       m.Dispatcher.QueueLen()),
 		)
 	}
 
 	// AI gRPC connection state (one entry per worker address)
 	if m.GRPCPool != nil {
 		for _, addr := range m.GRPCPool.Addrs() {
-			args = append(args,
-				"ai_grpc_addr", addr,
-				"ai_grpc_state", m.GRPCPool.State(addr).String(),
+			fields = append(fields,
+				zap.String("ai_grpc_addr",  addr),
+				zap.String("ai_grpc_state", m.GRPCPool.State(addr).String()),
 			)
 		}
 	}
@@ -114,12 +115,12 @@ func (m *Monitor) emit() {
 	// Callback H/2 preconnect state
 	if m.CallbackClient != nil {
 		st := m.CallbackClient.PreconnectState()
-		args = append(args,
-			"callback_url", st.URL,
-			"callback_connected", st.Connected,
+		fields = append(fields,
+			zap.String("callback_url",       st.URL),
+			zap.Bool("callback_connected",   st.Connected),
 		)
 		if st.Error != "" {
-			args = append(args, "callback_error", st.Error)
+			fields = append(fields, zap.String("callback_error", st.Error))
 		}
 	}
 
@@ -127,12 +128,12 @@ func (m *Monitor) emit() {
 	if m.PortAlloc != nil {
 		total := m.PortAlloc.Total()
 		avail := m.PortAlloc.Available()
-		args = append(args,
-			"rtp_ports_open", total-avail,
-			"rtp_ports_capacity", total,
+		fields = append(fields,
+			zap.Int("rtp_ports_open",     total-avail),
+			zap.Int("rtp_ports_capacity", total),
 		)
 	}
-	args = append(args, "rtp_shared_ingress", m.SharedIngress)
+	fields = append(fields, zap.Bool("rtp_shared_ingress", m.SharedIngress))
 
-	slog.Info("monitor.stats", args...)
+	zap.L().Info("monitor.stats", fields...)
 }

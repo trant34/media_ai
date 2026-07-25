@@ -38,6 +38,7 @@ func (f *fakeStarter) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 }
 
 func (f *fakeStarter) UpdateCallbackSink(_, _ string) *result.HTTPCallbackSink { return nil }
+func (f *fakeStarter) StartMockResultPump(_ *session.Session, _ string)       {}
 
 type noopDialer struct{}
 

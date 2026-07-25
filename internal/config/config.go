@@ -60,10 +60,11 @@ type DCSFSection struct {
 
 // GatewaySection định danh node và bật/tắt ingress protocol.
 type GatewaySection struct {
-	Name          string `yaml:"name"`
-	ID            string `yaml:"id"`
-	RawRTPEnabled bool   `yaml:"raw_rtp_enabled"`
-	WebRTCEnabled bool   `yaml:"webrtc_enabled"`
+	Name             string `yaml:"name"`
+	ID               string `yaml:"id"`
+	RawRTPEnabled    bool   `yaml:"raw_rtp_enabled"`
+	WebRTCEnabled    bool   `yaml:"webrtc_enabled"`
+	MockResultPump   bool   `yaml:"mock_result_pump"` // bật giả lập ASR result mỗi 1s (chỉ dùng cho test)
 }
 
 // ServerSection cấu hình HTTP/2 control plane.
@@ -356,6 +357,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		ResultCallbackURL:      c.Callback.URL,
 		WebRTCEnabled:          c.Gateway.WebRTCEnabled,
 		WebRTC:                 c.ToWebRTCConfig(),
+		MockResultPump:         c.Gateway.MockResultPump,
 	}
 }
 

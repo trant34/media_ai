@@ -3,12 +3,12 @@ package ai
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -251,11 +251,11 @@ func (p *SharedConnPool) getOrCreate(addr string) (*grpc.ClientConn, error) {
 func (p *SharedConnPool) Preconnect(addr string) {
 	conn, err := p.getOrCreate(addr)
 	if err != nil {
-		slog.Warn("ai: grpc preconnect failed", "addr", addr, "err", err)
+		zap.L().Warn("ai: grpc preconnect failed", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 	conn.Connect() // trigger async dial; gRPC tự retry nếu server chưa sẵn sàng
-	slog.Info("ai: gRPC connection initiated", "addr", addr, "state", conn.GetState())
+	zap.L().Info("ai: gRPC connection initiated", zap.String("addr", addr), zap.Stringer("state", conn.GetState()))
 }
 
 // State trả về trạng thái kết nối tới addr (dùng để health check / logging).
@@ -278,7 +278,7 @@ func (p *SharedConnPool) WatchAndReconnect(ctx context.Context, addr string) {
 	conn, ok := p.conns[addr]
 	p.mu.Unlock()
 	if !ok {
-		slog.Warn("ai: grpc watch: no connection", "addr", addr)
+		zap.L().Warn("ai: grpc watch: no connection", zap.String("addr", addr))
 		return
 	}
 
@@ -288,16 +288,16 @@ func (p *SharedConnPool) WatchAndReconnect(ctx context.Context, addr string) {
 			return // ctx cancelled
 		}
 		state = conn.GetState()
-		slog.Debug("ai: grpc state change", "addr", addr, "state", state)
+		zap.L().Debug("ai: grpc state change", zap.String("addr", addr), zap.Stringer("state", state))
 		switch state {
 		case connectivity.Idle:
 			// Sau GOAWAY (graceful disconnect), conn về IDLE — reconnect ngay.
 			conn.Connect()
 		case connectivity.TransientFailure:
-			slog.Warn("ai: grpc transient failure, triggering reconnect", "addr", addr)
+			zap.L().Warn("ai: grpc transient failure, triggering reconnect", zap.String("addr", addr))
 			conn.Connect()
 		case connectivity.Shutdown:
-			slog.Error("ai: grpc connection shutdown", "addr", addr)
+			zap.L().Error("ai: grpc connection shutdown", zap.String("addr", addr))
 			return
 		}
 	}
@@ -346,14 +346,14 @@ type grpcStreamClient struct {
 
 func (c *grpcStreamClient) Send(chunk pipeline.AudioChunk) error {
 	if c.firstSent.CompareAndSwap(false, true) {
-		slog.Debug("ai: first chunk sent to worker",
-			"session_id", chunk.SessionID,
-			"stream_id", chunk.StreamID,
-			"language", c.language,
-			"task", c.task,
-			"pcm_bytes", len(chunk.PCM),
-			"sample_rate", chunk.SampleRate,
-			"end_of_stream", chunk.EndOfStream,
+		zap.L().Debug("ai: first chunk sent to worker",
+			zap.String("session_id",  chunk.SessionID),
+			zap.String("stream_id",   chunk.StreamID),
+			zap.String("language",    c.language),
+			zap.String("task",        c.task),
+			zap.Int("pcm_bytes",      len(chunk.PCM)),
+			zap.Int("sample_rate",    chunk.SampleRate),
+			zap.Bool("end_of_stream", chunk.EndOfStream),
 		)
 	}
 	return c.cs.SendMsg(&audioChunkWire{

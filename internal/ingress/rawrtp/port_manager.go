@@ -2,12 +2,12 @@ package rawrtp
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"sync/atomic"
 	"time"
 
 	pionrtp "github.com/pion/rtp"
+	"go.uber.org/zap"
 
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/session"
@@ -64,7 +64,7 @@ func StartSessionListener(
 				continue
 			}
 			if firstPkt.CompareAndSwap(false, true) {
-				slog.Debug("rtp: first packet received", "session_id", sess.ID, "port", port, "ssrc", hdr.SSRC, "pt", hdr.PayloadType)
+				zap.L().Debug("rtp: first packet received", zap.String("session_id", sess.ID), zap.Int("port", port), zap.Uint32("ssrc", hdr.SSRC), zap.Uint8("pt", hdr.PayloadType))
 			}
 			pkt := pipeline.MediaPacket{
 				SessionID:    sess.ID,

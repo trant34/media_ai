@@ -27,6 +27,7 @@ gateway:
   id: "gw-ha-01"               # override per node (hoặc dùng env var / K8s downward API)
   raw_rtp_enabled: true
   webrtc_enabled: true
+  mock_result_pump: false
 
 # ── Control plane ─────────────────────────────────────────────────────────────
 server:

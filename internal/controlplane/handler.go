@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"media-ai-gateway/internal/ingress/rawrtp"
 	"media-ai-gateway/internal/pipeline"
@@ -22,10 +22,10 @@ import (
 // notifyEvent handles POST /v1/vonras/call-sessions/:callId/notify-event.
 // Dispatches on sessionEvent.event: BEGIN → 200 OK; ANSWER → create session + allocate RTP port.
 func (s *Server) notifyEvent(c *gin.Context) {
-	if slog.Default().Enabled(c.Request.Context(), slog.LevelDebug) {
+	if zap.L().Core().Enabled(zap.DebugLevel) {
 		raw, _ := io.ReadAll(c.Request.Body)
 		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-		slog.Debug("dcsf→dcas: notify-event raw", "call_id", c.Param("callId"), "body", string(raw))
+		zap.L().Debug("dcsf→dcas: notify-event raw", zap.String("call_id", c.Param("callId")), zap.ByteString("body", raw))
 	}
 
 	var event SessionEvent
@@ -34,7 +34,7 @@ func (s *Server) notifyEvent(c *gin.Context) {
 		return
 	}
 	callID := c.Param("callId")
-	slog.Debug("dcsf→dcas: notify-event", "call_id", callID, "event", event.Event, "service", event.SelectedService, "callback_url", event.CallbackURL)
+	zap.L().Debug("dcsf→dcas: notify-event", zap.String("call_id", callID), zap.String("event", event.Event), zap.String("service", event.SelectedService), zap.String("callback_url", event.CallbackURL))
 	switch strings.ToUpper(event.Event) {
 	case "BEGIN":
 		c.JSON(http.StatusOK, gin.H{})
@@ -170,7 +170,7 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		resp.TCoreLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, tcorePort, 0)
 		resp.TAccessLocalNonDcMedia = buildNonDcMedia(codec, sampleRate, 1, taccessPort, 0)
 	}
-	slog.Debug("dcas→dcsf: answer ack", "call_id", callID, "rtp_ip", resp.RTPIP, "tcore_rtp_port", resp.TCoreRTPPort, "taccess_rtp_port", resp.TAccessRTPPort)
+	zap.L().Debug("dcas→dcsf: answer ack", zap.String("call_id", callID), zap.String("rtp_ip", resp.RTPIP), zap.Int("tcore_rtp_port", resp.TCoreRTPPort), zap.Int("taccess_rtp_port", resp.TAccessRTPPort))
 	c.JSON(http.StatusOK, resp)
 	c.Writer.Flush()
 
@@ -180,12 +180,12 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 			timeout = 30 * time.Second
 		}
 		ctrlResultURL := s.cfg.PublicURL + "/v1/vonras/call-sessions/" + callID + "/ctrl-result"
-		slog.Debug("dcas→dcsf: call-control", "call_id", callID, "target", event.CallbackURL, "service", event.SelectedService, "ctrl_result_url", ctrlResultURL)
+		zap.L().Debug("dcas→dcsf: call-control", zap.String("call_id", callID), zap.String("target", event.CallbackURL), zap.String("service", event.SelectedService), zap.String("ctrl_result_url", ctrlResultURL))
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			if err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, event.SelectedService, ctrlResultURL); err != nil {
-				slog.Warn("call-control failed, releasing session", "call_id", callID, "err", err)
+				zap.L().Warn("call-control failed, releasing session", zap.String("call_id", callID), zap.Error(err))
 				s.sessionMgr.Close(tcoreID)
 				s.sessionMgr.Close(taccessID)
 			}
@@ -224,10 +224,10 @@ func (s *Server) getCallSession(c *gin.Context) {
 // ctrlResult handles POST /v1/vonras/call-sessions/:callId/ctrl-result.
 // Updates mediaResources and per-termination callbackUrl for both tcore and taccess sessions.
 func (s *Server) ctrlResult(c *gin.Context) {
-	if slog.Default().Enabled(c.Request.Context(), slog.LevelDebug) {
+	if zap.L().Core().Enabled(zap.DebugLevel) {
 		raw, _ := io.ReadAll(c.Request.Body)
 		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-		slog.Debug("dcsf→dcas: ctrl-result raw", "call_id", c.Param("callId"), "body", string(raw))
+		zap.L().Debug("dcsf→dcas: ctrl-result raw", zap.String("call_id", c.Param("callId")), zap.ByteString("body", raw))
 	}
 
 	var req CtrlResultRequest
@@ -236,16 +236,17 @@ func (s *Server) ctrlResult(c *gin.Context) {
 		return
 	}
 	id := c.Param("callId")
-	slog.Debug("dcsf→dcas: ctrl-result", "call_id", id, "has_media_resources", req.MediaResources != nil)
+	zap.L().Debug("dcsf→dcas: ctrl-result", zap.String("call_id", id), zap.Bool("has_media_resources", req.MediaResources != nil))
 
 	if req.MediaResources != nil {
-		slog.Debug("dcsf→dcas: ctrl-result media", "call_id", id,
-			"tcore_ctx", req.MediaResources.TCore.ContextID,
-			"tcore_term", req.MediaResources.TCore.Termination.TerminationID,
-			"tcore_callback", req.MediaResources.TCore.CallbackURL,
-			"taccess_ctx", req.MediaResources.TAccess.ContextID,
-			"taccess_term", req.MediaResources.TAccess.Termination.TerminationID,
-			"taccess_callback", req.MediaResources.TAccess.CallbackURL,
+		zap.L().Debug("dcsf→dcas: ctrl-result media",
+			zap.String("call_id",         id),
+			zap.String("tcore_ctx",       req.MediaResources.TCore.ContextID),
+			zap.String("tcore_term",      req.MediaResources.TCore.Termination.TerminationID),
+			zap.String("tcore_callback",  req.MediaResources.TCore.CallbackURL),
+			zap.String("taccess_ctx",     req.MediaResources.TAccess.ContextID),
+			zap.String("taccess_term",    req.MediaResources.TAccess.Termination.TerminationID),
+			zap.String("taccess_callback", req.MediaResources.TAccess.CallbackURL),
 		)
 
 		tcorePatch := session.SessionPatch{
@@ -261,6 +262,11 @@ func (s *Server) ctrlResult(c *gin.Context) {
 			if cb := s.coord.UpdateCallbackSink(id+"-tcore", req.MediaResources.TCore.CallbackURL); cb != nil {
 				s.RegisterCallbackSink(cb)
 			}
+			if s.cfg.MockResultPump {
+				if sessTCore, ok := s.sessionMgr.Get(id + "-tcore"); ok {
+					s.coord.StartMockResultPump(sessTCore, req.MediaResources.TCore.Termination.TerminationID)
+				}
+			}
 		}
 
 		taccessPatch := session.SessionPatch{
@@ -275,6 +281,11 @@ func (s *Server) ctrlResult(c *gin.Context) {
 		if _, err := s.sessionMgr.Update(id+"-taccess", taccessPatch); err == nil {
 			if cb := s.coord.UpdateCallbackSink(id+"-taccess", req.MediaResources.TAccess.CallbackURL); cb != nil {
 				s.RegisterCallbackSink(cb)
+			}
+			if s.cfg.MockResultPump {
+				if sessAccess, ok := s.sessionMgr.Get(id + "-taccess"); ok {
+					s.coord.StartMockResultPump(sessAccess, req.MediaResources.TAccess.Termination.TerminationID)
+				}
 			}
 		}
 	}
@@ -296,7 +307,7 @@ func (s *Server) ctrlResult(c *gin.Context) {
 // Closes both {callId}-tcore and {callId}-taccess sessions.
 func (s *Server) deleteCallSession(c *gin.Context) {
 	callID := c.Param("callId")
-	slog.Debug("dcsf→dcas: delete call-session", "call_id", callID)
+	zap.L().Debug("dcsf→dcas: delete call-session", zap.String("call_id", callID))
 	closedCore := s.sessionMgr.Close(callID + "-tcore")
 	closedAccess := s.sessionMgr.Close(callID + "-taccess")
 	if !closedCore && !closedAccess {

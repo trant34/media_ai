@@ -19,6 +19,7 @@ gateway:
   id: "gw-mock"
   raw_rtp_enabled: true
   webrtc_enabled: false   # tắt WebRTC cho test RTP đơn giản
+  mock_result_pump: true  # bật giả lập ASR result 1s/lần → gửi về MF sau khi nhận ctrl-result
 
 server:
   http_addr: ":8080"

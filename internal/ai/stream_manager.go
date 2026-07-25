@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"media-ai-gateway/internal/pipeline"
 )
 
@@ -163,7 +163,7 @@ func (m *Manager) Open(
 	go s.runWithReconnect(ctx, m.dialer, client, sessionID, streamID, language, task, audioIn, resultOut)
 
 	m.streams[sessionID] = s
-	slog.Debug("ai: stream opened", "session_id", sessionID, "stream_id", streamID, "language", language, "task", task)
+	zap.L().Debug("ai: stream opened", zap.String("session_id", sessionID), zap.String("stream_id", streamID), zap.String("language", language), zap.String("task", task))
 
 	// Auto-cleanup: accumulate stream stats then remove from map.
 	go func() {
@@ -199,7 +199,7 @@ func (m *Manager) Close(sessionID string) bool {
 	if !ok {
 		return false
 	}
-	slog.Debug("ai: stream closed", "session_id", sessionID)
+	zap.L().Debug("ai: stream closed", zap.String("session_id", sessionID))
 	s.cancel()
 	return true
 }

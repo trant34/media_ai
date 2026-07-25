@@ -2,10 +2,10 @@ package webrtc
 
 import (
 	"context"
-	"log/slog"
 	"net"
 
 	pion "github.com/pion/webrtc/v4"
+	"go.uber.org/zap"
 )
 
 const udpProxyMTU = 65535
@@ -64,8 +64,8 @@ func (p *udpProxy) wire(ctx context.Context, dc dcRelayer) {
 			return
 		}
 		if _, err := p.conn.WriteToUDP(msg.Data, p.appAddr); err != nil {
-			slog.Warn("udp proxy: forward to app server failed",
-				"session_id", p.sessID, "err", err)
+			zap.L().Warn("udp proxy: forward to app server failed",
+				zap.String("session_id", p.sessID), zap.Error(err))
 		}
 	})
 }
@@ -92,8 +92,8 @@ func (p *udpProxy) run(ctx context.Context, dc dcRelayer) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 		if err := dc.Send(data); err != nil {
-			slog.Warn("udp proxy: relay to DataChannel failed",
-				"session_id", p.sessID, "err", err)
+			zap.L().Warn("udp proxy: relay to DataChannel failed",
+				zap.String("session_id", p.sessID), zap.Error(err))
 		}
 	}
 }

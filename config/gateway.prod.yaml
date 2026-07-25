@@ -6,6 +6,7 @@ gateway:
   id: "gw-prod-01"
   raw_rtp_enabled: true
   webrtc_enabled: true
+  mock_result_pump: false
 
 server:
   http_addr: ":443"

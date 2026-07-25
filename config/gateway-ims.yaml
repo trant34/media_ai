@@ -28,6 +28,7 @@ gateway:
   id: "gw-ims-01"               # mỗi node cần ID riêng trong multi-node
   raw_rtp_enabled: true          # Raw RTP từ SBC
   webrtc_enabled: false          # không cần WebRTC trong IMS core
+  mock_result_pump: false        # không giả lập trong production IMS
 
 # ── Control plane (TLS, expose cho SBC management) ───────────────────────────
 server:

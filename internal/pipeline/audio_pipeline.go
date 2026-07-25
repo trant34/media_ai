@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"go.uber.org/zap"
 	"media-ai-gateway/internal/audio"
 	"media-ai-gateway/internal/codec"
 )
@@ -74,7 +74,7 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 
 	if sp.pcmBuf != nil {
 		if err := binary.Write(sp.pcmBuf, binary.LittleEndian, pcm); err != nil {
-			slog.Warn("pcm dump write error", "path", sp.pcmPath, "err", err)
+			zap.L().Warn("pcm dump write error", zap.String("path", sp.pcmPath), zap.Error(err))
 			sp.pcmBuf = nil // tắt dump sau lỗi để tránh lặp log
 		} else {
 			sp.pcmBytes += int64(len(pcm) * 2)
@@ -114,14 +114,14 @@ func (sp *sessionPipeline) flush() {
 	if sp.pcmFile != nil {
 		if sp.pcmBuf != nil {
 			if err := sp.pcmBuf.Flush(); err != nil {
-				slog.Warn("pcm dump flush error", "path", sp.pcmPath, "err", err)
+				zap.L().Warn("pcm dump flush error", zap.String("path", sp.pcmPath), zap.Error(err))
 			}
 			sp.pcmBuf = nil
 		}
 		_ = sp.pcmFile.Sync()
 		sp.pcmFile.Close()
 		sp.pcmFile = nil
-		slog.Debug("pcm dump closed", "path", sp.pcmPath, "bytes", sp.pcmBytes)
+		zap.L().Debug("pcm dump closed", zap.String("path", sp.pcmPath), zap.Int64("bytes", sp.pcmBytes))
 	}
 
 	ac := sp.chunker.Flush()
@@ -177,7 +177,7 @@ func newSessionPipeline(ctx context.Context, cfg SessionConfig, audioOut chan<- 
 			return nil, fmt.Errorf("pipeline: pcm dump open: %w", err)
 		}
 		pcmBuf = bufio.NewWriterSize(pcmFile, 32*1024) // 32 KiB buffer ≈ 100 packets
-		slog.Info("pcm dump opened", "path", pcmPath, "session_id", cfg.SessionID)
+		zap.L().Info("pcm dump opened", zap.String("path", pcmPath), zap.String("session_id", cfg.SessionID))
 	}
 
 	return &sessionPipeline{

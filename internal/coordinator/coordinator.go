@@ -6,10 +6,10 @@
 package coordinator
 
 import (
-	"log/slog"
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"media-ai-gateway/internal/ai"
 	"media-ai-gateway/internal/jitter"
 	"media-ai-gateway/internal/pipeline"
@@ -195,16 +195,16 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 			if r.MediaResources == nil && sess.MediaResources != nil {
 				r.MediaResources = sess.MediaResources
 			}
-			slog.Debug("ai: result received",
-				"session_id", r.SessionID,
-				"stream_id", r.StreamID,
-				"is_final", r.IsFinal,
-				"text", r.Text,
-				"seq", r.Seq,
-				"confidence", r.Confidence,
-				"language", r.Language,
-				"ts_start", r.TsStart,
-				"ts_end", r.TsEnd,
+			zap.L().Debug("ai: result received",
+				zap.String("session_id", r.SessionID),
+				zap.String("stream_id",  r.StreamID),
+				zap.Bool("is_final",     r.IsFinal),
+				zap.String("text",       r.Text),
+				zap.Uint64("seq",        r.Seq),
+				zap.Float32("confidence", r.Confidence),
+				zap.String("language",   r.Language),
+				zap.Int64("ts_start",    r.TsStart),
+				zap.Int64("ts_end",      r.TsEnd),
 			)
 			_ = c.dispatcher.Push(sess.Ctx, r)
 		}
@@ -221,6 +221,41 @@ func (c *Coordinator) UpdateCallbackSink(sessID, newURL string) *result.HTTPCall
 	cbSink := c.newCallbackSink(newURL)
 	c.dispatcher.ReplaceHTTPSink(sessID, cbSink)
 	return cbSink
+}
+
+// StartMockResultPump giả lập kết quả ASR mỗi 1 giây cho môi trường test.
+// Goroutine tự thoát khi sess.Ctx bị cancel.
+func (c *Coordinator) StartMockResultPump(sess *session.Session, terminationID string) {
+	streamID := sess.ID
+	if sess.TrackID != "" {
+		streamID = sess.TrackID
+	}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		var seq uint64
+		for {
+			select {
+			case <-sess.Ctx.Done():
+				return
+			case <-ticker.C:
+				seq++
+				r := pipeline.RecognitionResult{
+					SessionID:  sess.ID,
+					StreamID:   streamID,
+					SourceType: sess.SourceType,
+					Text:       "đây là test MF term2text với " + terminationID + " lúc " + time.Now().Format("02/01/2006 15:04:05"),
+					IsFinal:    true,
+					Seq:        seq,
+					Confidence: 1.0,
+				}
+				select {
+				case sess.ResultQueue <- r:
+				default:
+				}
+			}
+		}
+	}()
 }
 
 // newCallbackSink tạo HTTPCallbackSink dùng shared client nếu có, hoặc per-sink transport.

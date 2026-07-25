@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"media-ai-gateway/internal/pipeline"
 )
@@ -97,25 +97,25 @@ func NewCallbackHTTPClient(timeout, readIdleTimeout, pingTimeout time.Duration) 
 func (c *CallbackHTTPClient) Preconnect(ctx context.Context, rawURL string) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		slog.Warn("callback: preconnect: invalid url", "url", rawURL, "err", err)
+		zap.L().Warn("callback: preconnect: invalid url", zap.String("url", rawURL), zap.Error(err))
 		c.recordPreconnect(rawURL, false, err.Error())
 		return
 	}
 	target := parsed.Scheme + "://" + parsed.Host + "/"
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
 	if err != nil {
-		slog.Warn("callback: preconnect: build request failed", "url", target, "err", err)
+		zap.L().Warn("callback: preconnect: build request failed", zap.String("url", target), zap.Error(err))
 		c.recordPreconnect(target, false, err.Error())
 		return
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		slog.Warn("callback: preconnect failed — will retry on first callback", "url", target, "err", err)
+		zap.L().Warn("callback: preconnect failed — will retry on first callback", zap.String("url", target), zap.Error(err))
 		c.recordPreconnect(target, false, err.Error())
 		return
 	}
 	resp.Body.Close()
-	slog.Info("callback: preconnected via HTTP/2", "url", target, "status", resp.StatusCode)
+	zap.L().Info("callback: preconnected via HTTP/2", zap.String("url", target), zap.Int("status", resp.StatusCode))
 	c.recordPreconnect(target, true, "")
 }
 
@@ -243,12 +243,12 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 		return fmt.Errorf("http_callback: marshal: %w", err)
 	}
 
-	slog.Debug("callback: sending",
-		"url", s.URL,
-		"session_id", r.SessionID,
-		"is_final", r.IsFinal,
-		"seq", r.Seq,
-		"body", string(body),
+	zap.L().Debug("callback: sending",
+		zap.String("url",        s.URL),
+		zap.String("session_id", r.SessionID),
+		zap.Bool("is_final",     r.IsFinal),
+		zap.Uint64("seq",        r.Seq),
+		zap.ByteString("body",   body),
 	)
 
 	var lastErr error
