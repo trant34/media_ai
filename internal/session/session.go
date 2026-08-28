@@ -4,10 +4,14 @@ package session
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"media-ai-gateway/internal/pipeline"
 )
+
+// rtpEgressFn là kiểu hàm gửi RTP egress — dùng atomic.Pointer để tránh import rtpout.
+type rtpEgressFn = func(payload []byte) error
 
 // Status là trạng thái vòng đời của một session.
 type Status string
@@ -48,6 +52,14 @@ type Session struct {
 	AudioQueue  chan pipeline.AudioChunk
 	ResultQueue chan pipeline.RecognitionResult
 
+	// PacketQueueDropped đếm số RTP packet bị drop do sess.PacketQueue đầy
+	// từ per-session UDP listener (port_manager). Thread-safe.
+	PacketQueueDropped atomic.Uint64
+
+	// rtpEgress được set bởi rawrtp ingress sau khi biết remote addr của MF.
+	// Nil cho đến khi packet đầu tiên từ MF đến. Thread-safe (atomic.Pointer).
+	rtpEgress atomic.Pointer[rtpEgressFn]
+
 	GatewayID string // ID of the gateway node that created this session
 	CreatedAt time.Time
 
@@ -58,6 +70,18 @@ type Session struct {
 	mu           sync.Mutex
 	lastPacketAt time.Time
 	status       Status
+}
+
+// SetRTPEgress đăng ký hàm gửi RTP egress cho session.
+// Được gọi bởi rawrtp.StartSessionListener sau khi biết remote addr của MF.
+func (s *Session) SetRTPEgress(fn rtpEgressFn) { s.rtpEgress.Store(&fn) }
+
+// SendRTP gửi payload qua RTP egress nếu đã được cấu hình, noop nếu chưa.
+func (s *Session) SendRTP(payload []byte) error {
+	if fn := s.rtpEgress.Load(); fn != nil {
+		return (*fn)(payload)
+	}
+	return nil
 }
 
 // Touch cập nhật lastPacketAt và chuyển sang Active nếu đang ở Created/Idle.

@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/google/gopacket v1.1.19
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/opus v0.1.0
 	github.com/pion/rtp v1.10.2

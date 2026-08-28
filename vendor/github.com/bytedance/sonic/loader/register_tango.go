@@ -1,3 +1,4 @@
+//go:build bytedance_tango
 // +build bytedance_tango
 
 /**

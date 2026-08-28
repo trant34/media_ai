@@ -119,7 +119,7 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 			c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "no RTP ports available", RetryAfterMs: 10000})
 			return
 		}
-		if err := rawrtp.StartSessionListener(sessTCore, s.cfg.RTPBindIP, p1, s.portAlloc); err != nil {
+		if err := rawrtp.StartSessionListener(sessTCore, s.cfg.RTPBindIP, p1, s.portAlloc, s.egressQueueFrames()); err != nil {
 			s.portAlloc.Release(p1)
 			s.portAlloc.Release(p2)
 			s.sessionMgr.Close(tcoreID)
@@ -127,7 +127,7 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "rtp: " + err.Error()})
 			return
 		}
-		if err := rawrtp.StartSessionListener(sessAccess, s.cfg.RTPBindIP, p2, s.portAlloc); err != nil {
+		if err := rawrtp.StartSessionListener(sessAccess, s.cfg.RTPBindIP, p2, s.portAlloc, s.egressQueueFrames()); err != nil {
 			// tcore listener goroutine running — closing tcoreID cancels its ctx → releases p1
 			s.portAlloc.Release(p2)
 			s.sessionMgr.Close(tcoreID)
@@ -184,7 +184,7 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			if err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, event.SelectedService, ctrlResultURL); err != nil {
+			if err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, ctrlResultURL); err != nil {
 				zap.L().Warn("call-control failed, releasing session", zap.String("call_id", callID), zap.Error(err))
 				s.sessionMgr.Close(tcoreID)
 				s.sessionMgr.Close(taccessID)
@@ -462,6 +462,14 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE media_ai_ai_reconnects_total counter\n")
 	fmt.Fprintf(w, "media_ai_ai_reconnects_total %d\n", aiSt.TotalRetries)
 
+	fmt.Fprintf(w, "# HELP media_ai_ai_audio_dropped_total AudioChunks dropped due to AI send queue full\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_audio_dropped_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_audio_dropped_total %d\n", aiSt.TotalAudioDropped)
+
+	fmt.Fprintf(w, "# HELP media_ai_ai_partial_dropped_total Partial ASR results dropped due to result queue full\n")
+	fmt.Fprintf(w, "# TYPE media_ai_ai_partial_dropped_total counter\n")
+	fmt.Fprintf(w, "media_ai_ai_partial_dropped_total %d\n", aiSt.TotalPartialDropped)
+
 	fmt.Fprintf(w, "# HELP media_ai_ai_first_result_ms_total Cumulative sum of first-result latencies per stream (ms)\n")
 	fmt.Fprintf(w, "# TYPE media_ai_ai_first_result_ms_total counter\n")
 	fmt.Fprintf(w, "media_ai_ai_first_result_ms_total %d\n", aiSt.LatencyFirstSum)
@@ -505,9 +513,17 @@ func (s *Server) metricsWrite(w io.Writer) {
 		fmt.Fprintf(w, "# TYPE media_ai_rtp_packets_routed_total counter\n")
 		fmt.Fprintf(w, "media_ai_rtp_packets_routed_total %d\n", ist.Routed)
 
-		fmt.Fprintf(w, "# HELP media_ai_rtp_queue_dropped_total RTP packets dropped: session queue full\n")
+		fmt.Fprintf(w, "# HELP media_ai_rtp_queue_dropped_total RTP packets dropped: session queue full (shared UDP ingress)\n")
 		fmt.Fprintf(w, "# TYPE media_ai_rtp_queue_dropped_total counter\n")
 		fmt.Fprintf(w, "media_ai_rtp_queue_dropped_total %d\n", ist.DroppedQueueFull)
+	}
+
+	fmt.Fprintf(w, "# HELP media_ai_rtp_session_queue_dropped_total RTP packets dropped: session queue full (per-session UDP listener)\n")
+	fmt.Fprintf(w, "# TYPE media_ai_rtp_session_queue_dropped_total counter\n")
+	fmt.Fprintf(w, "media_ai_rtp_session_queue_dropped_total %d\n", s.sessionMgr.TotalPacketQueueDropped())
+
+	if s.ingress != nil {
+		ist := s.ingress.Stats()
 
 		fmt.Fprintf(w, "# HELP media_ai_rtp_unknown_ssrc_total RTP packets dropped: no matching session SSRC\n")
 		fmt.Fprintf(w, "# TYPE media_ai_rtp_unknown_ssrc_total counter\n")
@@ -749,7 +765,7 @@ func buildNonDcMedia(codec string, sampleRate, channels, rtpPort int, payloadTyp
 	if fmtp != "" {
 		aLines = append(aLines, fmtp)
 	}
-	aLines = append(aLines, "ptime:20", fmt.Sprintf("maxptime:%d", maxptime), "recvonly")
+	aLines = append(aLines, "ptime:20", fmt.Sprintf("maxptime:%d", maxptime), "sendrecv")
 
 	return &NonDcMedia{
 		SDPMLine:  fmt.Sprintf("audio %d RTP/AVP %d", rtpPort, pt),

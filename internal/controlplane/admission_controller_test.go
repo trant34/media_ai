@@ -24,9 +24,21 @@ func newSessMgr(maxSessions int) *session.Manager {
 	})
 }
 
-// newPool tạo WorkerPool không có worker đang chạy — submit job sẽ nằm lại trong queue.
-func newPool(queueSize int) *pipeline.WorkerPool {
-	return pipeline.NewWorkerPool(pipeline.WorkerPoolConfig{Workers: 0, QueueSize: queueSize})
+// stubPool là poolQueue stub dùng để inject giá trị queue metrics trực tiếp trong tests.
+// Thay thế real WorkerPool để tránh race condition với per-session goroutine.
+type stubPool struct{ len, cap int }
+
+func (s *stubPool) QueueLen() int { return s.len }
+func (s *stubPool) QueueCap() int { return s.cap }
+
+// newPool tạo stubPool với capacity cho trước và queue rỗng.
+func newPool(queueSize int) *stubPool {
+	return &stubPool{cap: queueSize}
+}
+
+// fillQueue đặt số lượng items "đang chờ" trong stub pool.
+func fillQueue(pool *stubPool, n int) {
+	pool.len = n
 }
 
 func newAIMgr(maxStreams int) *ai.Manager {
@@ -43,13 +55,6 @@ func fillSessions(t *testing.T, mgr *session.Manager, n int) {
 		if err != nil {
 			t.Fatalf("fillSessions %d: %v", i, err)
 		}
-	}
-}
-
-// fillQueue submit n job vào pool (không có worker → job nằm trong queue).
-func fillQueue(pool *pipeline.WorkerPool, n int) {
-	for i := 0; i < n; i++ {
-		_ = pool.Submit(context.Background(), pipeline.AudioJob{SessionID: fmt.Sprintf("q%d", i)})
 	}
 }
 
@@ -71,9 +76,8 @@ func openStreams(t *testing.T, mgr *ai.Manager, n int) context.CancelFunc {
 	return cancel
 }
 
-// newAC tạo AdmissionController với deps sạch (MaxSessions=1000, QueueSize=1000, MaxStreams=1000).
-// Caller override bất kỳ dep nào trước khi điền dữ liệu.
-func newAC(sessMgr *session.Manager, pool *pipeline.WorkerPool, aiMgr *ai.Manager, portAlloc *PortAllocator) *AdmissionController {
+// newAC tạo AdmissionController với deps sạch.
+func newAC(sessMgr *session.Manager, pool poolQueue, aiMgr *ai.Manager, portAlloc *PortAllocator) *AdmissionController {
 	return NewAdmissionController(sessMgr, pool, aiMgr, portAlloc)
 }
 

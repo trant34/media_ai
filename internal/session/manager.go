@@ -279,6 +279,17 @@ func (m *Manager) CreatedTotal() uint64 { return m.createdTotal.Load() }
 // ClosedTotal trả về tổng số session đã bị đóng kể từ khi khởi động.
 func (m *Manager) ClosedTotal() uint64 { return m.closedTotal.Load() }
 
+// TotalPacketQueueDropped tổng hợp PacketQueueDropped từ tất cả session đang active.
+func (m *Manager) TotalPacketQueueDropped() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var total uint64
+	for _, s := range m.sessions {
+		total += s.PacketQueueDropped.Load()
+	}
+	return total
+}
+
 // Run khởi động vòng lặp GC nền, kiểm tra idle timeout theo GCInterval.
 // Blocks cho đến khi ctx bị cancel.
 func (m *Manager) Run(ctx context.Context) {

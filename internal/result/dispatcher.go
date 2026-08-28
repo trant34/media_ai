@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"media-ai-gateway/internal/pipeline"
 )
 
@@ -159,6 +160,12 @@ func (d *Dispatcher) dispatch(ctx context.Context, r pipeline.RecognitionResult)
 		cancel()
 		if err != nil {
 			d.sendErrors.Add(1)
+			zap.L().Debug("result: sink send error",
+				zap.String("session_id", r.SessionID),
+				zap.String("sink_type", sink.Type()),
+				zap.Bool("is_final", r.IsFinal),
+				zap.Error(err),
+			)
 		} else {
 			d.sent.Add(1)
 			if r.IsFinal {

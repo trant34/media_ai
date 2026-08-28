@@ -23,13 +23,14 @@ session:
   gc_interval_sec: 5
 
 pipeline:
-  audio_worker_count: 4
-  audio_job_queue_size: 512
+  audio_worker_count: 4      # unused — per-session goroutine model
+  audio_job_queue_size: 32   # per-session job queue
+  jitter_out_queue_size: 16
 
 audio:
   output_sample_rate: 16000
   output_channels: 1
-  chunk_ms: 500
+  chunk_ms: 100
 
 ai:
   grpc_target: ""   # NullDialer — gateway chạy đầy đủ, không có transcript
@@ -41,3 +42,13 @@ result:
 log:
   level: "debug"
   format: "json"
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

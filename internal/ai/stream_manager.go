@@ -49,9 +49,11 @@ func DefaultConfig() Config {
 
 // ManagerStats là snapshot thống kê tích lũy của Manager (bao gồm cả stream đã đóng).
 type ManagerStats struct {
-	TotalSendErrors uint64
-	TotalRecvErrors uint64
-	TotalRetries    uint64
+	TotalSendErrors    uint64
+	TotalRecvErrors    uint64
+	TotalRetries       uint64
+	TotalAudioDropped  uint64 // AudioChunk bị drop do AI send queue đầy
+	TotalPartialDropped uint64 // partial result bị drop do resultOut đầy
 
 	// FirstResultMs: first-result latency (stream open → first result) từ tất cả stream đã đóng + active.
 	LatencyFirstCount uint64
@@ -78,6 +80,8 @@ type Manager struct {
 	totalSendErrors       atomic.Uint64
 	totalRecvErrors       atomic.Uint64
 	totalRetries          atomic.Uint64
+	totalAudioDropped     atomic.Uint64
+	totalPartialDropped   atomic.Uint64
 	totalFirstResultCount atomic.Uint64
 	totalFirstResultSum   atomic.Int64
 }
@@ -85,7 +89,7 @@ type Manager struct {
 // Stats trả về snapshot thống kê tích lũy: tổng lỗi, retries và latency từ cả stream đang chạy và đã đóng.
 func (m *Manager) Stats() ManagerStats {
 	m.mu.RLock()
-	var activeSend, activeRecv uint64
+	var activeSend, activeRecv, activeAudioDrop, activePartialDrop uint64
 	var activeRetries int
 	var activeFirstCount uint64
 	var activeFirstSum int64
@@ -94,6 +98,8 @@ func (m *Manager) Stats() ManagerStats {
 		activeSend += st.SendErrors
 		activeRecv += st.RecvErrors
 		activeRetries += st.Retries
+		activeAudioDrop += st.AudioDropped
+		activePartialDrop += st.PartialDropped
 		if st.FirstResultMs > 0 {
 			activeFirstCount++
 			activeFirstSum += st.FirstResultMs
@@ -102,11 +108,13 @@ func (m *Manager) Stats() ManagerStats {
 	m.mu.RUnlock()
 
 	return ManagerStats{
-		TotalSendErrors:   m.totalSendErrors.Load() + activeSend,
-		TotalRecvErrors:   m.totalRecvErrors.Load() + activeRecv,
-		TotalRetries:      m.totalRetries.Load() + uint64(activeRetries),
-		LatencyFirstCount: m.totalFirstResultCount.Load() + activeFirstCount,
-		LatencyFirstSum:   m.totalFirstResultSum.Load() + activeFirstSum,
+		TotalSendErrors:     m.totalSendErrors.Load() + activeSend,
+		TotalRecvErrors:     m.totalRecvErrors.Load() + activeRecv,
+		TotalRetries:        m.totalRetries.Load() + uint64(activeRetries),
+		TotalAudioDropped:   m.totalAudioDropped.Load() + activeAudioDrop,
+		TotalPartialDropped: m.totalPartialDropped.Load() + activePartialDrop,
+		LatencyFirstCount:   m.totalFirstResultCount.Load() + activeFirstCount,
+		LatencyFirstSum:     m.totalFirstResultSum.Load() + activeFirstSum,
 	}
 }
 
@@ -172,6 +180,8 @@ func (m *Manager) Open(
 		m.totalSendErrors.Add(st.SendErrors)
 		m.totalRecvErrors.Add(st.RecvErrors)
 		m.totalRetries.Add(uint64(st.Retries))
+		m.totalAudioDropped.Add(st.AudioDropped)
+		m.totalPartialDropped.Add(st.PartialDropped)
 		if st.FirstResultMs > 0 {
 			m.totalFirstResultCount.Add(1)
 			m.totalFirstResultSum.Add(st.FirstResultMs)

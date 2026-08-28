@@ -10,44 +10,44 @@ import (
 // --- WorkerInfo.Supports ---
 
 func TestWorkerInfo_Supports_ExactMatch(t *testing.T) {
-	w := WorkerInfo{Languages: []string{"vi"}, Tasks: []string{"transcribe"}}
-	if !w.Supports("vi", "transcribe") {
+	w := WorkerInfo{Languages: []string{"vi"}, Tasks: []string{"speech_to_text"}}
+	if !w.Supports("vi", "speech_to_text") {
 		t.Error("exact match should be supported")
 	}
-	if w.Supports("en", "transcribe") {
+	if w.Supports("en", "speech_to_text") {
 		t.Error("wrong language should not match")
 	}
-	if w.Supports("vi", "translate") {
+	if w.Supports("vi", "realtime_translation") {
 		t.Error("wrong task should not match")
 	}
 }
 
 func TestWorkerInfo_Supports_Wildcard(t *testing.T) {
 	w := WorkerInfo{Languages: []string{"*"}, Tasks: []string{"*"}}
-	if !w.Supports("vi", "transcribe") {
+	if !w.Supports("vi", "speech_to_text") {
 		t.Error("wildcard language+task should match anything")
 	}
-	if !w.Supports("zh", "translate") {
+	if !w.Supports("zh", "realtime_translation") {
 		t.Error("wildcard should match any language/task")
 	}
 }
 
 func TestWorkerInfo_Supports_EmptyList(t *testing.T) {
 	w := WorkerInfo{Languages: nil, Tasks: nil}
-	if !w.Supports("vi", "transcribe") {
+	if !w.Supports("vi", "speech_to_text") {
 		t.Error("empty capability list should match everything")
 	}
 }
 
 func TestWorkerInfo_Supports_MultipleLanguages(t *testing.T) {
-	w := WorkerInfo{Languages: []string{"vi", "en"}, Tasks: []string{"transcribe"}}
-	if !w.Supports("vi", "transcribe") {
+	w := WorkerInfo{Languages: []string{"vi", "en"}, Tasks: []string{"speech_to_text"}}
+	if !w.Supports("vi", "speech_to_text") {
 		t.Error("vi should match")
 	}
-	if !w.Supports("en", "transcribe") {
+	if !w.Supports("en", "speech_to_text") {
 		t.Error("en should match")
 	}
-	if w.Supports("zh", "transcribe") {
+	if w.Supports("zh", "speech_to_text") {
 		t.Error("zh should not match")
 	}
 }
@@ -155,13 +155,13 @@ func TestWorkerRegistry_TTL_ExpiresStaleWorker(t *testing.T) {
 func TestWorkerRegistry_Select_PicksLeastLoaded(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "heavy", Addr: "heavy:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 		MaxStreams: 10, ActiveStreams: 8})
 	r.Register(WorkerInfo{ID: "light", Addr: "light:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 		MaxStreams: 10, ActiveStreams: 2})
 
-	w, err := r.Select("vi", "transcribe")
+	w, err := r.Select("vi", "speech_to_text")
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -173,9 +173,9 @@ func TestWorkerRegistry_Select_PicksLeastLoaded(t *testing.T) {
 func TestWorkerRegistry_Select_FiltersUnsupportedLanguage(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "en-worker", Addr: "en:50051",
-		Languages: []string{"en"}, Tasks: []string{"transcribe"}})
+		Languages: []string{"en"}, Tasks: []string{"speech_to_text"}})
 
-	_, err := r.Select("vi", "transcribe")
+	_, err := r.Select("vi", "speech_to_text")
 	if !errors.Is(err, ErrNoWorkerAvailable) {
 		t.Errorf("expected ErrNoWorkerAvailable, got %v", err)
 	}
@@ -184,9 +184,9 @@ func TestWorkerRegistry_Select_FiltersUnsupportedLanguage(t *testing.T) {
 func TestWorkerRegistry_Select_FiltersUnsupportedTask(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "stt-only", Addr: "stt:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"}})
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"}})
 
-	_, err := r.Select("vi", "translate")
+	_, err := r.Select("vi", "realtime_translation")
 	if !errors.Is(err, ErrNoWorkerAvailable) {
 		t.Errorf("expected ErrNoWorkerAvailable, got %v", err)
 	}
@@ -195,10 +195,10 @@ func TestWorkerRegistry_Select_FiltersUnsupportedTask(t *testing.T) {
 func TestWorkerRegistry_Select_SkipsAtCapacity(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "full", Addr: "full:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 		MaxStreams: 5, ActiveStreams: 5}) // at capacity
 
-	_, err := r.Select("vi", "transcribe")
+	_, err := r.Select("vi", "speech_to_text")
 	if !errors.Is(err, ErrNoWorkerAvailable) {
 		t.Errorf("expected ErrNoWorkerAvailable for full worker, got %v", err)
 	}
@@ -209,7 +209,7 @@ func TestWorkerRegistry_Select_WildcardWorker(t *testing.T) {
 	r.Register(WorkerInfo{ID: "any", Addr: "any:50051",
 		Languages: []string{"*"}, Tasks: []string{"*"}})
 
-	w, err := r.Select("zh", "translate")
+	w, err := r.Select("zh", "realtime_translation")
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestWorkerRegistry_Select_WildcardWorker(t *testing.T) {
 
 func TestWorkerRegistry_Select_EmptyRegistry(t *testing.T) {
 	r := NewWorkerRegistry(0)
-	_, err := r.Select("vi", "transcribe")
+	_, err := r.Select("vi", "speech_to_text")
 	if !errors.Is(err, ErrNoWorkerAvailable) {
 		t.Errorf("expected ErrNoWorkerAvailable on empty registry, got %v", err)
 	}
@@ -230,13 +230,13 @@ func TestWorkerRegistry_Select_PreferUnlimited(t *testing.T) {
 	// Worker with MaxStreams=0 should score 0 → preferred over limited worker.
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "limited", Addr: "limited:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 		MaxStreams: 10, ActiveStreams: 1})
 	r.Register(WorkerInfo{ID: "unlimited", Addr: "unlimited:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 		MaxStreams: 0, ActiveStreams: 100}) // MaxStreams=0 → score=0
 
-	w, err := r.Select("vi", "transcribe")
+	w, err := r.Select("vi", "speech_to_text")
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRoutingDialer_Dial_RoutesToCorrectWorker(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{
 		ID: "vi-worker", Addr: "vi-worker:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"},
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"},
 	})
 
 	var dialedAddr string
@@ -262,7 +262,7 @@ func TestRoutingDialer_Dial_RoutesToCorrectWorker(t *testing.T) {
 
 	d := NewRoutingDialer(r, dialFn)
 	ctx := context.Background()
-	_, err := d.Dial(ctx, "sess-1", "stream-1", "vi", "transcribe")
+	_, err := d.Dial(ctx, "sess-1", "stream-1", "vi", "speech_to_text")
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestRoutingDialer_Dial_NoWorker_ReturnsErr(t *testing.T) {
 	r := NewWorkerRegistry(0) // empty
 	d := NewRoutingDialer(r, nil)
 
-	_, err := d.Dial(context.Background(), "sess-1", "stream-1", "vi", "transcribe")
+	_, err := d.Dial(context.Background(), "sess-1", "stream-1", "vi", "speech_to_text")
 	if err == nil {
 		t.Fatal("expected error when no workers available")
 	}
@@ -287,7 +287,7 @@ func TestRoutingDialer_Dial_NoWorker_ReturnsErr(t *testing.T) {
 func TestRoutingDialer_Dial_PropagatesDialError(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "w1", Addr: "w1:50051",
-		Languages: []string{"vi"}, Tasks: []string{"transcribe"}})
+		Languages: []string{"vi"}, Tasks: []string{"speech_to_text"}})
 
 	dialErr := errors.New("connection refused")
 	dialFn := func(ctx context.Context, workerAddr, sessionID, streamID, language, task string) (StreamClient, error) {
@@ -295,7 +295,7 @@ func TestRoutingDialer_Dial_PropagatesDialError(t *testing.T) {
 	}
 
 	d := NewRoutingDialer(r, dialFn)
-	_, err := d.Dial(context.Background(), "sess-1", "stream-1", "vi", "transcribe")
+	_, err := d.Dial(context.Background(), "sess-1", "stream-1", "vi", "speech_to_text")
 	if !errors.Is(err, dialErr) {
 		t.Errorf("expected wrapped dialErr, got %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRoutingDialer_Dial_PropagatesDialError(t *testing.T) {
 func TestRoutingDialer_Dial_PassesAllParams(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "w1", Addr: "w1:50051",
-		Languages: []string{"en"}, Tasks: []string{"translate"}})
+		Languages: []string{"en"}, Tasks: []string{"realtime_translation"}})
 
 	var gotSession, gotStream, gotLang, gotTask string
 	dialFn := func(ctx context.Context, workerAddr, sessionID, streamID, language, task string) (StreamClient, error) {
@@ -316,10 +316,10 @@ func TestRoutingDialer_Dial_PassesAllParams(t *testing.T) {
 	}
 
 	d := NewRoutingDialer(r, dialFn)
-	d.Dial(context.Background(), "my-session", "my-stream", "en", "translate")
+	d.Dial(context.Background(), "my-session", "my-stream", "en", "realtime_translation")
 
 	if gotSession != "my-session" || gotStream != "my-stream" ||
-		gotLang != "en" || gotTask != "translate" {
+		gotLang != "en" || gotTask != "realtime_translation" {
 		t.Errorf("params not forwarded correctly: session=%q stream=%q lang=%q task=%q",
 			gotSession, gotStream, gotLang, gotTask)
 	}

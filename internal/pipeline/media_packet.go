@@ -26,7 +26,9 @@ type AudioChunk struct {
 	PCM          []byte
 	SampleRate   int
 	Channels     int
-	RTPTimestamp uint32 // RTP timestamp (samples) của packet đầu tiên trong chunk
+	RTPTimestamp uint32 // RTP timestamp của packet đầu tiên trong chunk (đơn vị: RTPClockRate)
+	RTPClockRate int    // clock rate của RTP stream gốc (Hz, e.g. 8000, 48000); 0 = unknown
 	DurationMs   int64
-	EndOfStream  bool // true = chunk cuối của stream, AI worker đóng nhận dạng sau chunk này
+	ChunkSeq     uint64 // monotonic sequence per stream, 0-based; detect lost/reorder chunk
+	EndOfStream  bool   // true = chunk cuối của stream, AI worker đóng nhận dạng sau chunk này
 }

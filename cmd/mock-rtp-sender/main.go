@@ -185,6 +185,7 @@ func main() {
 	}
 	zapCfg := zap.NewProductionConfig()
 	zapCfg.Level = zap.NewAtomicLevelAt(zapLevel)
+	zapCfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000000Z07:00")
 	logger, err := zapCfg.Build()
 	if err != nil {
 		panic(err)

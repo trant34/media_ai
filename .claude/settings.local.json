@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"D:\\\\NAMCHT\\\\ims\\\\SRC\\\\media_ai\\\\vendor\" /B)",
+      "Bash(go mod *)"
+    ]
+  }
+}

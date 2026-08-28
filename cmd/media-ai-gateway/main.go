@@ -46,6 +46,7 @@ import (
 	"media-ai-gateway/internal/config"
 	"media-ai-gateway/internal/controlplane"
 	"media-ai-gateway/internal/coordinator"
+	"media-ai-gateway/internal/debug/pcap"
 	"media-ai-gateway/internal/ingress/rawrtp"
 	"media-ai-gateway/internal/monitor"
 	"media-ai-gateway/internal/pipeline"
@@ -197,6 +198,17 @@ func main() {
 		apiSrv.SetGRPCPool(grpcPool)
 	}
 
+	// ── PCAP capture (Linux only, debug) ──────────────────────────────────
+	if cfg.PCAP.Enabled {
+		rec, err := pcap.New(cfg.ToPCAPConfig())
+		if err != nil {
+			zap.L().Warn("pcap: disabled", zap.Error(err))
+		} else {
+			rec.Start()
+			defer rec.Stop()
+		}
+	}
+
 	// ── run ────────────────────────────────────────────────────────────────
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -300,6 +312,7 @@ func buildZapLogger(level string) *zap.Logger {
 	cfg := zap.NewProductionConfig()
 	cfg.Level = zap.NewAtomicLevelAt(l)
 	cfg.OutputPaths = []string{"stdout"}
+	cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000000Z07:00")
 	logger, err := cfg.Build()
 	if err != nil {
 		panic(fmt.Sprintf("failed to build logger: %v", err))

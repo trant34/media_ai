@@ -137,34 +137,40 @@ func TestUnregisterSession_FlushesPartialChunk(t *testing.T) {
 // ---------- Submit ----------
 
 func TestSubmit_QueueFull(t *testing.T) {
-	wp := NewWorkerPool(WorkerPoolConfig{Workers: 0, QueueSize: 2})
-	out := make(chan AudioChunk, 16)
+	// Per-session queue capacity = 2. Submit bão hoà để đảm bảo ít nhất một ErrQueueFull
+	// bất kể tốc độ goroutine per-session xử lý.
+	wp := NewWorkerPool(WorkerPoolConfig{QueueSize: 2})
+	out := make(chan AudioChunk, 256)
 	_ = wp.RegisterSession(context.Background(), defaultSessionCfg("s1"), out)
 
-	_ = wp.Submit(context.Background(), makeJob("s1"))
-	_ = wp.Submit(context.Background(), makeJob("s1"))
-	err := wp.Submit(context.Background(), makeJob("s1"))
-	if err != ErrQueueFull {
-		t.Fatalf("want ErrQueueFull, got %v", err)
+	gotQueueFull := false
+	for i := 0; i < 50; i++ {
+		if err := wp.Submit(context.Background(), makeJob("s1")); err == ErrQueueFull {
+			gotQueueFull = true
+			break
+		}
 	}
-	stats := wp.Stats()
-	if stats.Dropped == 0 {
+	if !gotQueueFull {
+		t.Fatal("want at least one ErrQueueFull")
+	}
+	if wp.Stats().Dropped == 0 {
 		t.Fatal("dropped should be > 0")
 	}
 }
 
 func TestSubmit_CtxCancelledDrops(t *testing.T) {
-	wp := NewWorkerPool(WorkerPoolConfig{Workers: 0, QueueSize: 2})
+	wp := NewWorkerPool(DefaultWorkerPoolConfig())
 	out := make(chan AudioChunk, 16)
 	_ = wp.RegisterSession(context.Background(), defaultSessionCfg("s1"), out)
-	_ = wp.Submit(context.Background(), makeJob("s1"))
-	_ = wp.Submit(context.Background(), makeJob("s1"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := wp.Submit(ctx, makeJob("s1"))
 	if err == nil {
 		t.Fatal("want error from cancelled ctx")
+	}
+	if wp.Stats().Dropped == 0 {
+		t.Fatal("dropped should be > 0")
 	}
 }
 

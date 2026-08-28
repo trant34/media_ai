@@ -15,6 +15,8 @@ type MediaResources struct {
 }
 
 // RecognitionResult là transcript/kết quả trả về từ AI Worker.
+// Nếu AudioPayload != nil, coordinator sẽ gửi payload này về MF qua RTP egress
+// thay vì (hoặc song song với) dispatch text sang callback.
 type RecognitionResult struct {
 	SessionID      string          `json:"session_id"`
 	StreamID       string          `json:"stream_id"`
@@ -27,4 +29,11 @@ type RecognitionResult struct {
 	Language       string          `json:"language,omitempty"`
 	Seq            uint64          `json:"seq"`
 	MediaResources *MediaResources `json:"mediaResources,omitempty"`
+
+	// AudioPayload chứa audio đã encode (cùng codec với session, e.g. PCMU)
+	// do AI Worker trả về để gateway gửi ngược lại MF qua RTP.
+	// Nil = text-only result (hành vi hiện tại).
+	AudioPayload []byte `json:"audio_payload,omitempty"`
+	// AudioPT là RTP payload type của AudioPayload (e.g. 0 cho PCMU).
+	AudioPT uint8 `json:"audio_pt,omitempty"`
 }

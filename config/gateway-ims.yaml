@@ -62,31 +62,33 @@ session:
   idle_timeout_sec:         60      # SBC có thể giữ session open dài hơn sau im lặng
   gc_interval_sec:          10
   per_session_packet_queue: 256     # buffer lớn hơn cho IMS — SBC có thể burst
-  per_session_audio_queue:  256
-  per_session_result_queue: 128
+  per_session_audio_queue:  80      # 80 × 100ms = 8s — đủ cover AI reconnect cycle (max 7s backoff)
+  per_session_result_queue: 32      # dispatcher xử lý nhanh, 32 là đủ
+  per_session_egress_queue: 300     # 300 × 20ms = 6s — IMS call có utterance dài hơn (dịch thuật)
 
 # ── Audio pipeline ────────────────────────────────────────────────────────────
 # AMR-WB: RTP payload 8kHz/20ms → decode → PCM 16kHz → gửi AI
 # AMR-NB: RTP payload 8kHz/20ms → decode → PCM 8kHz  → gửi AI (nếu AI hỗ trợ)
 pipeline:
-  audio_worker_count:   32      # scale theo số lõi CPU
-  audio_job_queue_size: 16384   # buffer đủ lớn cho burst từ nhiều SBC
+  audio_worker_count:   32      # unused — per-session goroutine model
+  audio_job_queue_size: 32      # per-session job queue (packet đang chờ pipeline goroutine)
   jitter_buffer_ms:     80      # IMS network thường có jitter cao hơn LAN
   max_packet_late_ms:   200     # AMR-WB 20ms frame — chấp nhận đến muộn tối đa 200ms
   packet_time_ms:       20      # AMR-WB và G.711 đều dùng 20ms ptime
+  jitter_out_queue_size: 32     # tăng theo jitter_buffer_ms cao hơn
 
 # ── Audio output ──────────────────────────────────────────────────────────────
 audio:
   output_sample_rate: 16000   # AI worker thường cần 16kHz
   output_channels:    1       # mono
-  chunk_ms:           500     # gửi AI mỗi 500ms (25 frames AMR-WB/G.711 20ms)
+  chunk_ms:           100     # gửi AI mỗi 100ms (5 frames G.711/AMR-WB 20ms)
   # pcm_dump_dir: ""          # để trống trên production
 
 # ── AI gRPC ───────────────────────────────────────────────────────────────────
 ai:
   grpc_target:         "ai-cluster.internal:50051"
   max_active_streams:  5000         # = max_sessions
-  per_stream_queue_size: 20
+  per_stream_queue_size: 32         # IMS call dài — buffer thêm khi gRPC slow
   send_timeout_ms:     500
   stream_timeout_sec:  600          # IMS call có thể kéo dài >5 phút
   max_retry:            3
@@ -130,3 +132,13 @@ log:
   level: "info"
   format: "json"   # structured log cho ELK / Loki
   monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

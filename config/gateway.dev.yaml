@@ -21,12 +21,13 @@ session:
   idle_timeout_sec: 60
 
 pipeline:
-  audio_worker_count: 4
-  audio_job_queue_size: 256
+  audio_worker_count: 4      # unused — per-session goroutine model
+  audio_job_queue_size: 32   # per-session job queue
   jitter_buffer_ms: 40
+  jitter_out_queue_size: 16
 
 audio:
-  chunk_ms: 500
+  chunk_ms: 100
 
 ai:
   grpc_target: "localhost:50051"
@@ -41,3 +42,13 @@ result:
 log:
   level: "debug"
   format: "text"   # dễ đọc hơn khi dev
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

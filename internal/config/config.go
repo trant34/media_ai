@@ -17,6 +17,7 @@ import (
 	"media-ai-gateway/internal/ai"
 	"media-ai-gateway/internal/controlplane"
 	"media-ai-gateway/internal/coordinator"
+	"media-ai-gateway/internal/debug/pcap"
 	rawrtp "media-ai-gateway/internal/ingress/rawrtp"
 	webrtcingress "media-ai-gateway/internal/ingress/webrtc"
 	"media-ai-gateway/internal/jitter"
@@ -39,6 +40,7 @@ type GatewayConfig struct {
 	Callback CallbackSection `yaml:"callback"`
 	DCSF     DCSFSection     `yaml:"dcsf"`
 	Log      LogSection      `yaml:"log"`
+	PCAP     PCAPSection     `yaml:"pcap"`
 }
 
 // DCSFHostConfig mô tả một DCSF endpoint cần pre-warm H/2 connection.
@@ -114,6 +116,7 @@ type SessionSection struct {
 	PerSessionPacketQueue int `yaml:"per_session_packet_queue"`
 	PerSessionAudioQueue  int `yaml:"per_session_audio_queue"`
 	PerSessionResultQueue int `yaml:"per_session_result_queue"`
+	PerSessionEgressQueue int `yaml:"per_session_egress_queue"` // egress pacer buffer (frames); 200 frame = 4s tại 20ms/frame
 }
 
 // PipelineSection cấu hình audio worker pool và jitter buffer.
@@ -123,6 +126,7 @@ type PipelineSection struct {
 	JitterBufferMs    int `yaml:"jitter_buffer_ms"`
 	MaxPacketLateMs   int `yaml:"max_packet_late_ms"`
 	PacketTimeMs      int `yaml:"packet_time_ms"`
+	JitterOutQueueSize int `yaml:"jitter_out_queue_size"` // cap channel jitter buffer → WorkerPool
 }
 
 // AudioSection cấu hình output audio format và chunk size.
@@ -164,6 +168,21 @@ type CallbackSection struct {
 	PingTimeoutMs     int    `yaml:"ping_timeout_ms"`      // đóng conn nếu không nhận PONG sau N ms
 }
 
+// PCAPSection cấu hình PCAP packet capture (Linux only, AF_PACKET).
+// Port range được lấy từ RTP config (rtp.port_start / rtp.port_end).
+// enabled: false theo mặc định — chỉ bật khi cần debug.
+type PCAPSection struct {
+	Enabled   bool   `yaml:"enabled"`
+	Interface string `yaml:"interface"`   // e.g. "eth0"
+	OutputDir string `yaml:"output_dir"`  // e.g. "/var/log/media-ai-gateway/pcap"
+	QueueSize int    `yaml:"queue_size"`  // bounded capture queue per direction; default 8192
+	SnapLen   int    `yaml:"snaplen"`     // max bytes per packet; default 65535
+	Rotate    struct {
+		MaxSizeMB int `yaml:"max_size_mb"` // rotate when file exceeds this; 0 = no rotation
+		MaxFiles  int `yaml:"max_files"`   // keep at most N files per direction; 0 = unlimited
+	} `yaml:"rotate"`
+}
+
 // LogSection cấu hình logging và periodic monitor.
 type LogSection struct {
 	Level              string `yaml:"level"`                // debug | info | warn | error
@@ -199,18 +218,20 @@ func Default() GatewayConfig {
 			PerSessionPacketQueue: 128,
 			PerSessionAudioQueue:  128,
 			PerSessionResultQueue: 64,
+			PerSessionEgressQueue: 200, // 200 × 20ms = 4s — đủ cover utterance dài nhất thực tế
 		},
 		Pipeline: PipelineSection{
-			AudioWorkerCount:  16,
-			AudioJobQueueSize: 8192,
-			JitterBufferMs:    60,
-			MaxPacketLateMs:   120,
-			PacketTimeMs:      20,
+			AudioWorkerCount:   16,  // unused — per-session goroutine model; kept for config compat
+			AudioJobQueueSize:  32,  // per-session job queue (packets đang chờ xử lý per session)
+			JitterBufferMs:     60,
+			MaxPacketLateMs:    120,
+			PacketTimeMs:       20,
+			JitterOutQueueSize: 16,
 		},
 		Audio: AudioSection{
 			OutputSampleRate: 16000,
 			OutputChannels:   1,
-			ChunkMs:          500,
+			ChunkMs:          100,
 		},
 		AI: AISection{
 			GRPCTarget:          "ai-router:50051",
@@ -314,6 +335,7 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 			MaxLateMs:    c.Pipeline.MaxPacketLateMs,
 			PacketTimeMs: c.Pipeline.PacketTimeMs,
 		},
+		JitterOutSize:   c.Pipeline.JitterOutQueueSize,
 		OutSampleRate:   c.Audio.OutputSampleRate,
 		OutChannels:     c.Audio.OutputChannels,
 		ChunkMs:         c.Audio.ChunkMs,
@@ -358,6 +380,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		WebRTCEnabled:          c.Gateway.WebRTCEnabled,
 		WebRTC:                 c.ToWebRTCConfig(),
 		MockResultPump:         c.Gateway.MockResultPump,
+		EgressQueueFrames:      c.Session.PerSessionEgressQueue,
 	}
 }
 
@@ -378,6 +401,23 @@ func (c GatewayConfig) ToDCSFAddrs() []string {
 		addrs = append(addrs, fmt.Sprintf("%s:%d", h.Host, h.Port))
 	}
 	return addrs
+}
+
+// ToPCAPConfig chuyển đổi sang pcap.Config.
+// PortMin/PortMax lấy từ RTP config để capture đúng port pool của gateway.
+func (c GatewayConfig) ToPCAPConfig() pcap.Config {
+	return pcap.Config{
+		Interface: c.PCAP.Interface,
+		OutputDir: c.PCAP.OutputDir,
+		PortMin:   uint16(c.RTP.PortStart), //nolint:gosec
+		PortMax:   uint16(c.RTP.PortEnd),   //nolint:gosec
+		QueueSize: c.PCAP.QueueSize,
+		SnapLen:   uint32(c.PCAP.SnapLen), //nolint:gosec
+		Rotate: pcap.RotateConfig{
+			MaxSizeMB: c.PCAP.Rotate.MaxSizeMB,
+			MaxFiles:  c.PCAP.Rotate.MaxFiles,
+		},
+	}
 }
 
 // ToWebRTCConfig chuyển đổi sang webrtcingress.Config.

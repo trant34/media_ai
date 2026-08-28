@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,10 +16,9 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// dcsfCallControlRequest là body của POST /v1/dcsf/call-sessions/{callId}/call-control.
+// dcsfCallControlRequest là body của POST /v1/dcsf/call-sessions/{callId}/call-control/{dcasId}/{callbackKey}.
 type dcsfCallControlRequest struct {
 	CallID      string `json:"callId"`
-	ServiceName string `json:"service_name"`
 	Actions     string `json:"actions"`
 	CallbackURL string `json:"callbackUrl,omitempty"` // URL DCAS nhận ctrl-result từ DCSF
 }
@@ -118,13 +118,12 @@ func (p *DCSFPool) clientFor(rawURL string) *http.Client {
 }
 
 // SendCallControl POST CALL_CTRL đến DCSF tại dcsfURL với actions="duplicate".
-// dcsfURL lấy từ trường callbackUrl trong ANSWER notify-event body.
+// dcsfURL lấy từ trường callbackUrl trong ANSWER notify-event body (format: .../call-control/{dcasId}/{callbackKey}).
 // ctrlResultURL là URL của DCAS để DCSF gửi ctrl-result trở lại; rỗng thì bỏ qua.
 // Host chưa cấu hình sẽ tự động tạo pool mới. Nil receiver an toàn.
-func (p *DCSFPool) SendCallControl(ctx context.Context, dcsfURL, callID, serviceName, ctrlResultURL string) error {
+func (p *DCSFPool) SendCallControl(ctx context.Context, dcsfURL, callID, ctrlResultURL string) error {
 	body, err := json.Marshal(dcsfCallControlRequest{
 		CallID:      callID,
-		ServiceName: serviceName,
 		Actions:     "duplicate",
 		CallbackURL: ctrlResultURL,
 	})
@@ -142,9 +141,18 @@ func (p *DCSFPool) SendCallControl(ctx context.Context, dcsfURL, callID, service
 	if err != nil {
 		return fmt.Errorf("dcsf: request: %w", err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Cause string `json:"cause"`
+		}
+		if b, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096)); readErr == nil {
+			json.Unmarshal(b, &errBody) //nolint:errcheck
+		}
+		if errBody.Cause != "" {
+			return fmt.Errorf("dcsf: call-control status %d: %s", resp.StatusCode, errBody.Cause)
+		}
 		return fmt.Errorf("dcsf: call-control status %d", resp.StatusCode)
 	}
 	zap.L().Debug("dcas→dcsf: call-control OK", zap.String("call_id", callID), zap.String("url", dcsfURL), zap.Int("status", resp.StatusCode))

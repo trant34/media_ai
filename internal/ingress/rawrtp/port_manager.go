@@ -9,6 +9,7 @@ import (
 	pionrtp "github.com/pion/rtp"
 	"go.uber.org/zap"
 
+	"media-ai-gateway/internal/egress/rtpout"
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/session"
 )
@@ -25,11 +26,16 @@ type PortReleaser interface {
 // The port is released via releaser.Release when the read goroutine exits.
 // On bind failure the error is returned immediately; the caller must release
 // the port manually.
+//
+// egressQueueFrames sets the egress pacer buffer size (frames). Suggested: 200
+// (4s at 20ms/frame). The pacer paces AI audio_payload back to MF at real-time
+// speed instead of sending a full utterance as a burst.
 func StartSessionListener(
 	sess *session.Session,
 	bindIP string,
 	port int,
 	releaser PortReleaser,
+	egressQueueFrames int,
 ) error {
 	addr := fmt.Sprintf("%s:%d", bindIP, port)
 	conn, err := net.ListenPacket("udp", addr)
@@ -54,7 +60,7 @@ func StartSessionListener(
 		var firstPkt atomic.Bool
 		buf := make([]byte, 1500)
 		for {
-			n, _, err := conn.ReadFrom(buf)
+			n, remoteAddr, err := conn.ReadFrom(buf)
 			if err != nil {
 				return
 			}
@@ -65,6 +71,21 @@ func StartSessionListener(
 			}
 			if firstPkt.CompareAndSwap(false, true) {
 				zap.L().Debug("rtp: first packet received", zap.String("session_id", sess.ID), zap.Int("port", port), zap.Uint32("ssrc", hdr.SSRC), zap.Uint8("pt", hdr.PayloadType))
+				// Tạo egress sender + pacer dùng lại cùng socket, gửi về remoteAddr (MF source).
+				// SSRC egress = inbound SSRC XOR mask để đảm bảo khác.
+				const ptimeMs = 20
+				sender := rtpout.New(conn, remoteAddr, hdr.SSRC^0x80000000, hdr.PayloadType, sess.SampleRate, ptimeMs)
+				pacer := rtpout.NewPacer(sender, sess.ID, ptimeMs, egressQueueFrames)
+				go pacer.Run(sess.Ctx)
+				sess.SetRTPEgress(func(payload []byte) error {
+					if n := pacer.Push(payload); n > 0 {
+						zap.L().Warn("rtp: egress pacer queue full, frames dropped",
+							zap.String("session_id", sess.ID),
+							zap.Int("dropped_frames", n))
+					}
+					return nil
+				})
+				zap.L().Debug("rtp: egress sender ready", zap.String("session_id", sess.ID), zap.String("remote_addr", remoteAddr.String()))
 			}
 			pkt := pipeline.MediaPacket{
 				SessionID:    sess.ID,
@@ -85,7 +106,7 @@ func StartSessionListener(
 			case <-sess.Ctx.Done():
 				return
 			default:
-				// drop if queue full
+				sess.PacketQueueDropped.Add(1)
 			}
 		}
 	}()

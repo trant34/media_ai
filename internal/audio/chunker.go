@@ -9,21 +9,27 @@ type Chunk struct {
 	PCM          []byte
 	SampleRate   int
 	Channels     int
-	RTPTimestamp uint32 // RTP timestamp (samples) của packet đầu tiên trong chunk
+	RTPTimestamp uint32 // RTP timestamp của packet đầu tiên trong chunk
+	RTPClockRate int    // clock rate của RTP stream gốc (Hz, e.g. 8000, 48000); 0 = unknown
 	DurationMs   int64
+	ChunkSeq     uint64 // monotonic sequence per stream, 0-based; dùng để detect lost/reorder chunk
 }
 
 // ChunkerConfig định nghĩa tham số chunk đầu ra.
 type ChunkerConfig struct {
-	SampleRate int // Hz đầu ra (ví dụ: 16000)
-	Channels   int // kênh đầu ra (1 = mono)
-	ChunkMs    int // độ dài chunk tính bằng ms (ví dụ: 500)
+	SampleRate   int // Hz đầu ra (ví dụ: 16000)
+	Channels     int // kênh đầu ra (1 = mono)
+	ChunkMs      int // độ dài chunk tính bằng ms (ví dụ: 500)
+	RTPClockRate int // clock rate của RTP stream gốc (Hz); 0 = unknown
 }
 
 // Chunker tích lũy PCM int16 frames và phát ra Chunk có độ dài cố định.
 //
 // RTPTimestamp của mỗi chunk = RTP timestamp của packet RTP đầu tiên đóng góp
 // sample vào chunk đó (lấy trực tiếp từ RTP header, đơn vị: sample).
+//
+// ChunkSeq tăng đơn điệu từ 0 per stream, độc lập với RTPTimestamp —
+// dùng để phát hiện lost/reorder chunk giữa RTPGW và AI.
 //
 // Không goroutine-safe: dùng một Chunker per session/goroutine.
 type Chunker struct {
@@ -33,7 +39,10 @@ type Chunker struct {
 
 	buf        []int16 // accumulation buffer
 	chunkSamps int     // samples/chunk = SampleRate * ChunkMs / 1000
-	curRTPTs   uint32  // RTP timestamp của packet đầu tiên trong chunk hiện tại
+
+	seq        uint64 // monotonic chunk counter
+	hasStartTS bool   // true khi curRTPTs đã được set cho chunk đang hình thành
+	curRTPTs   uint32 // RTP timestamp của packet đầu tiên trong chunk hiện tại
 }
 
 // NewChunker tạo Chunker mới.
@@ -62,11 +71,10 @@ func (c *Chunker) Push(pcm []int16, rtpTs uint32) []Chunk {
 		return nil
 	}
 
-	// oldCount: số sample từ các packet cũ còn trong buffer trước khi nối thêm.
-	// Dùng để xác định đúng thời điểm chunk kế tiếp bắt đầu bởi packet hiện tại.
-	oldCount := len(c.buf)
-	if oldCount == 0 {
+	// Ghi nhận timestamp của packet đầu tiên đóng góp vào chunk đang hình thành.
+	if !c.hasStartTS {
 		c.curRTPTs = rtpTs
+		c.hasStartTS = true
 	}
 	c.buf = append(c.buf, pcm...)
 
@@ -78,13 +86,14 @@ func (c *Chunker) Push(pcm []int16, rtpTs uint32) []Chunk {
 	for len(c.buf) >= c.chunkSamps {
 		chunks = append(chunks, c.emit(c.buf[:c.chunkSamps]))
 		c.buf = c.buf[c.chunkSamps:]
-		// Giảm số sample cũ còn trong buf; khi hết, chunk tiếp theo bắt đầu bởi packet hiện tại.
-		if oldCount > 0 {
-			oldCount -= c.chunkSamps
-			if oldCount <= 0 {
-				oldCount = 0
-				c.curRTPTs = rtpTs
-			}
+		if len(c.buf) == 0 {
+			// Buffer rỗng sau emit — chunk tiếp theo bắt đầu bởi packet kế tiếp.
+			c.hasStartTS = false
+		} else {
+			// Remainder còn lại đến từ packet hiện tại (hoặc sau này nếu packet rất lớn).
+			// Cập nhật timestamp để chunk kế tiếp có timestamp chính xác nhất có thể.
+			c.curRTPTs = rtpTs
+			c.hasStartTS = true
 		}
 	}
 	return chunks
@@ -98,12 +107,15 @@ func (c *Chunker) Flush() *Chunk {
 	}
 	chunk := c.emit(c.buf)
 	c.buf = c.buf[:0]
+	c.hasStartTS = false
 	return &chunk
 }
 
-// emit tạo Chunk từ samples dùng RTP timestamp hiện tại.
+// emit tạo Chunk từ samples dùng RTP timestamp và sequence hiện tại.
 func (c *Chunker) emit(samples []int16) Chunk {
 	durMs := int64(len(samples)) * 1000 / int64(c.cfg.SampleRate)
+	seq := c.seq
+	c.seq++
 	return Chunk{
 		SessionID:    c.sessionID,
 		StreamID:     c.streamID,
@@ -111,6 +123,8 @@ func (c *Chunker) emit(samples []int16) Chunk {
 		SampleRate:   c.cfg.SampleRate,
 		Channels:     c.cfg.Channels,
 		RTPTimestamp: c.curRTPTs,
+		RTPClockRate: c.cfg.RTPClockRate,
 		DurationMs:   durMs,
+		ChunkSeq:     seq,
 	}
 }

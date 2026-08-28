@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"media-ai-gateway/internal/audio"
@@ -39,31 +39,53 @@ type SessionConfig struct {
 }
 
 // sessionPipeline giữ state xử lý âm thanh theo từng session.
-// Mutex bảo vệ Resampler và Chunker khỏi data race khi nhiều worker cạnh tranh
-// cùng một session (Resampler có phase accumulator, Chunker có PCM buffer).
+// Mỗi sessionPipeline có một goroutine riêng (run) là consumer duy nhất của jobCh,
+// đảm bảo thứ tự xử lý packet trong một session không bị đảo lộn.
 type sessionPipeline struct {
-	mu        sync.Mutex
+	jobCh  chan MediaPacket
+	done   chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// stats được chia sẻ với WorkerPool (pointer tới atomic của WorkerPool).
+	processed    *atomic.Uint64
+	decodeErrors *atomic.Uint64
+
 	decoder   codec.Decoder
 	resampler *audio.Resampler
 	chunker   *audio.Chunker
 	audioOut  chan<- AudioChunk
-	ctx       context.Context // session ctx: dừng emit khi session đóng
-	pcmFile   *os.File        // non-nil khi PCM dump được bật
-	pcmBuf    *bufio.Writer   // bufio wrapper để giảm syscall per-packet
-	pcmPath   string          // full path để log khi close
-	pcmBytes  int64           // tổng byte đã ghi
+	pcmFile   *os.File
+	pcmBuf    *bufio.Writer
+	pcmPath   string
+	pcmBytes  int64
+}
+
+// run là vòng lặp chính của goroutine per-session.
+// Đây là consumer duy nhất của jobCh — đảm bảo ordering tuyệt đối.
+// Thoát khi ctx bị cancel, sau đó gọi flush() để phát partial chunk còn lại.
+func (sp *sessionPipeline) run() {
+	defer close(sp.done)
+	defer sp.flush()
+	for {
+		select {
+		case pkt := <-sp.jobCh:
+			_, decErr := sp.process(pkt)
+			if decErr != nil {
+				sp.decodeErrors.Add(1)
+			} else {
+				sp.processed.Add(1)
+			}
+		case <-sp.ctx.Done():
+			return
+		}
+	}
 }
 
 // process decode + resample + chunk một MediaPacket.
+// Chỉ được gọi từ run() — không cần mutex vì single-goroutine.
 // Trả về số chunks đã emit và decode error (nếu có).
 func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-
-	if sp.ctx.Err() != nil {
-		return 0, nil // session đã đóng
-	}
-
 	pcm, err := sp.decoder.Decode(pkt.Payload)
 	if err != nil {
 		return 0, fmt.Errorf("pipeline: decode: %w", err)
@@ -75,7 +97,7 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 	if sp.pcmBuf != nil {
 		if err := binary.Write(sp.pcmBuf, binary.LittleEndian, pcm); err != nil {
 			zap.L().Warn("pcm dump write error", zap.String("path", sp.pcmPath), zap.Error(err))
-			sp.pcmBuf = nil // tắt dump sau lỗi để tránh lặp log
+			sp.pcmBuf = nil
 		} else {
 			sp.pcmBytes += int64(len(pcm) * 2)
 		}
@@ -93,7 +115,9 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 			SampleRate:   ac.SampleRate,
 			Channels:     ac.Channels,
 			RTPTimestamp: ac.RTPTimestamp,
+			RTPClockRate: ac.RTPClockRate,
 			DurationMs:   ac.DurationMs,
+			ChunkSeq:     ac.ChunkSeq,
 		}
 		select {
 		case sp.audioOut <- chunk:
@@ -106,11 +130,8 @@ func (sp *sessionPipeline) process(pkt MediaPacket) (int, error) {
 }
 
 // flush phát phần PCM còn lại trong Chunker buffer như partial chunk.
-// Gọi khi session đóng để không mất dữ liệu.
+// Chỉ được gọi từ run() sau khi vòng lặp chính thoát — không cần mutex.
 func (sp *sessionPipeline) flush() {
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-
 	if sp.pcmFile != nil {
 		if sp.pcmBuf != nil {
 			if err := sp.pcmBuf.Flush(); err != nil {
@@ -136,7 +157,9 @@ func (sp *sessionPipeline) flush() {
 		SampleRate:   ac.SampleRate,
 		Channels:     ac.Channels,
 		RTPTimestamp: ac.RTPTimestamp,
+		RTPClockRate: ac.RTPClockRate,
 		DurationMs:   ac.DurationMs,
+		ChunkSeq:     ac.ChunkSeq,
 		EndOfStream:  true,
 	}:
 	default:
@@ -144,26 +167,44 @@ func (sp *sessionPipeline) flush() {
 }
 
 // newSessionPipeline tạo sessionPipeline từ SessionConfig.
-func newSessionPipeline(ctx context.Context, cfg SessionConfig, audioOut chan<- AudioChunk) (*sessionPipeline, error) {
+// queueSize là dung lượng của jobCh (per-session packet queue).
+// processed và decodeErrors là pointers tới atomic counters của WorkerPool.
+func newSessionPipeline(
+	sessCtx context.Context,
+	cfg SessionConfig,
+	audioOut chan<- AudioChunk,
+	queueSize int,
+	processed *atomic.Uint64,
+	decodeErrors *atomic.Uint64,
+) (*sessionPipeline, error) {
+	ctx, cancel := context.WithCancel(sessCtx)
+
 	dec, err := codec.New(cfg.Codec, cfg.SampleRate, cfg.Channels)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("pipeline: codec: %w", err)
 	}
 	resampler := audio.NewResampler(dec.SampleRate(), dec.Channels(), cfg.OutSampleRate)
 	chunker := audio.NewChunker(
 		audio.ChunkerConfig{
-			SampleRate: cfg.OutSampleRate,
-			Channels:   cfg.OutChannels,
-			ChunkMs:    cfg.ChunkMs,
+			SampleRate:   cfg.OutSampleRate,
+			Channels:     cfg.OutChannels,
+			ChunkMs:      cfg.ChunkMs,
+			RTPClockRate: dec.SampleRate(),
 		},
 		cfg.SessionID, cfg.StreamID,
 	)
+
+	if queueSize <= 0 {
+		queueSize = 32
+	}
 
 	var pcmFile *os.File
 	var pcmBuf *bufio.Writer
 	var pcmPath string
 	if cfg.PCMDumpDir != "" {
 		if mkErr := os.MkdirAll(cfg.PCMDumpDir, 0o755); mkErr != nil {
+			cancel()
 			return nil, fmt.Errorf("pipeline: pcm dump dir: %w", mkErr)
 		}
 		pcmPath = filepath.Join(cfg.PCMDumpDir, fmt.Sprintf("%s.%s.%dhz.%dch.s16le",
@@ -174,20 +215,26 @@ func newSessionPipeline(ctx context.Context, cfg SessionConfig, audioOut chan<- 
 		))
 		pcmFile, err = os.OpenFile(pcmPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("pipeline: pcm dump open: %w", err)
 		}
-		pcmBuf = bufio.NewWriterSize(pcmFile, 32*1024) // 32 KiB buffer ≈ 100 packets
+		pcmBuf = bufio.NewWriterSize(pcmFile, 32*1024)
 		zap.L().Info("pcm dump opened", zap.String("path", pcmPath), zap.String("session_id", cfg.SessionID))
 	}
 
 	return &sessionPipeline{
-		decoder:   dec,
-		resampler: resampler,
-		chunker:   chunker,
-		audioOut:  audioOut,
-		ctx:       ctx,
-		pcmFile:   pcmFile,
-		pcmBuf:    pcmBuf,
-		pcmPath:   pcmPath,
+		jobCh:        make(chan MediaPacket, queueSize),
+		done:         make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
+		processed:    processed,
+		decodeErrors: decodeErrors,
+		decoder:      dec,
+		resampler:    resampler,
+		chunker:      chunker,
+		audioOut:     audioOut,
+		pcmFile:      pcmFile,
+		pcmBuf:       pcmBuf,
+		pcmPath:      pcmPath,
 	}, nil
 }

@@ -8,7 +8,7 @@ type WorkerInfo struct {
 	ID           string    // định danh duy nhất
 	Addr         string    // gRPC address "host:port"
 	Languages    []string  // ngôn ngữ hỗ trợ; ["*"] hoặc [] = không giới hạn
-	Tasks        []string  // task hỗ trợ ("transcribe","translate"); ["*"] hoặc [] = không giới hạn
+	Tasks        []string  // task hỗ trợ ("speech_to_text","realtime_translation"); ["*"] hoặc [] = không giới hạn
 	Models       []string  // model name, e.g. ["faster-whisper-medium","phowhisper-large"]
 	MaxStreams    int       // giới hạn stream đồng thời; 0 = không giới hạn
 	ActiveStreams int       // số stream đang chạy (từ heartbeat gần nhất)

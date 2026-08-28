@@ -57,7 +57,7 @@ func TestPortManager_ReceivesPacket(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	if err := StartSessionListener(sess, "127.0.0.1", port, releaser, 10); err != nil {
 		t.Fatalf("StartSessionListener: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestPortManager_StopsOnContextCancel(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	if err := StartSessionListener(sess, "127.0.0.1", port, releaser, 10); err != nil {
 		t.Fatalf("StartSessionListener: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestPortManager_BindError_ReturnsError(t *testing.T) {
 	sess, cancel := makeTestSession(t)
 	defer cancel()
 
-	err = StartSessionListener(sess, "127.0.0.1", port, releaser)
+	err = StartSessionListener(sess, "127.0.0.1", port, releaser, 10)
 	if err == nil {
 		t.Fatal("expected bind error, got nil")
 	}
@@ -150,7 +150,7 @@ func TestPortManager_MalformedPackets_Skipped(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	if err := StartSessionListener(sess, "127.0.0.1", port, releaser, 10); err != nil {
 		t.Fatalf("StartSessionListener: %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestPortManager_PopulatesReceivedAtMs(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	if err := StartSessionListener(sess, "127.0.0.1", port, releaser, 10); err != nil {
 		t.Fatalf("StartSessionListener: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestPortManager_QueueFull_Drops(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	if err := StartSessionListener(sess, "127.0.0.1", port, releaser, 10); err != nil {
 		t.Fatalf("StartSessionListener: %v", err)
 	}
 

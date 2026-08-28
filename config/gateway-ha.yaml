@@ -73,17 +73,18 @@ session:
 
 # ── Audio pipeline ────────────────────────────────────────────────────────────
 pipeline:
-  audio_worker_count:   16
-  audio_job_queue_size: 8192
+  audio_worker_count:   16    # unused — per-session goroutine model
+  audio_job_queue_size: 32    # per-session job queue
   jitter_buffer_ms:     60
   max_packet_late_ms:   120
   packet_time_ms:       20
+  jitter_out_queue_size: 16
 
 # ── Audio output ──────────────────────────────────────────────────────────────
 audio:
   output_sample_rate: 16000
   output_channels:    1
-  chunk_ms:           500
+  chunk_ms:           100
 
 # ── AI gRPC ───────────────────────────────────────────────────────────────────
 # AI Router cân bằng tải giữa các AI worker.
@@ -132,3 +133,13 @@ log:
   level: "info"
   format: "json"
   monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

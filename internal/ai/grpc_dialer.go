@@ -86,6 +86,14 @@ func marshalAudioChunk(m *audioChunkWire) []byte {
 		b = protowire.AppendTag(b, 10, protowire.BytesType)
 		b = protowire.AppendString(b, m.Task)
 	}
+	if m.RTPClockRate != 0 {
+		b = protowire.AppendTag(b, 11, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(int32(m.RTPClockRate)))
+	}
+	if m.ChunkSeq != 0 {
+		b = protowire.AppendTag(b, 12, protowire.VarintType)
+		b = protowire.AppendVarint(b, m.ChunkSeq)
+	}
 	return b
 }
 
@@ -161,6 +169,20 @@ func unmarshalRecognitionResult(b []byte, m *recognitionResultWire) error {
 			}
 			m.Seq = v
 			b = b[n:]
+		case num == 10 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.AudioPayload = append([]byte(nil), v...)
+			b = b[n:]
+		case num == 11 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			m.AudioPT = uint32(v)
+			b = b[n:]
 		default:
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
@@ -185,19 +207,23 @@ type audioChunkWire struct {
 	EndOfStream  bool
 	Language     string
 	Task         string
+	RTPClockRate int    // field 11: clock rate của RTP stream gốc (Hz)
+	ChunkSeq     uint64 // field 12: monotonic sequence per stream
 }
 
 // recognitionResultWire là wire type nhận từ AI worker.
 type recognitionResultWire struct {
-	SessionID  string
-	StreamID   string
-	Text       string
-	IsFinal    bool
-	TsStart    int64
-	TsEnd      int64
-	Confidence float32
-	Language   string
-	Seq        uint64
+	SessionID    string
+	StreamID     string
+	Text         string
+	IsFinal      bool
+	TsStart      int64
+	TsEnd        int64
+	Confidence   float32
+	Language     string
+	Seq          uint64
+	AudioPayload []byte // field 10: audio đã encode để gateway gửi về MF qua RTP
+	AudioPT      uint32 // field 11: RTP payload type của AudioPayload
 }
 
 // SharedConnPool giữ một *grpc.ClientConn dùng chung per AI worker address.
@@ -347,12 +373,12 @@ type grpcStreamClient struct {
 func (c *grpcStreamClient) Send(chunk pipeline.AudioChunk) error {
 	if c.firstSent.CompareAndSwap(false, true) {
 		zap.L().Debug("ai: first chunk sent to worker",
-			zap.String("session_id",  chunk.SessionID),
-			zap.String("stream_id",   chunk.StreamID),
-			zap.String("language",    c.language),
-			zap.String("task",        c.task),
-			zap.Int("pcm_bytes",      len(chunk.PCM)),
-			zap.Int("sample_rate",    chunk.SampleRate),
+			zap.String("session_id", chunk.SessionID),
+			zap.String("stream_id", chunk.StreamID),
+			zap.String("language", c.language),
+			zap.String("task", c.task),
+			zap.Int("pcm_bytes", len(chunk.PCM)),
+			zap.Int("sample_rate", chunk.SampleRate),
 			zap.Bool("end_of_stream", chunk.EndOfStream),
 		)
 	}
@@ -367,6 +393,8 @@ func (c *grpcStreamClient) Send(chunk pipeline.AudioChunk) error {
 		EndOfStream:  chunk.EndOfStream,
 		Language:     c.language,
 		Task:         c.task,
+		ChunkSeq:     chunk.ChunkSeq,
+		RTPClockRate: chunk.RTPClockRate,
 	})
 }
 
@@ -376,15 +404,17 @@ func (c *grpcStreamClient) Recv() (pipeline.RecognitionResult, error) {
 		return pipeline.RecognitionResult{}, err
 	}
 	return pipeline.RecognitionResult{
-		SessionID:  w.SessionID,
-		StreamID:   w.StreamID,
-		Text:       w.Text,
-		IsFinal:    w.IsFinal,
-		TsStart:    w.TsStart,
-		TsEnd:      w.TsEnd,
-		Confidence: w.Confidence,
-		Language:   w.Language,
-		Seq:        w.Seq,
+		SessionID:    w.SessionID,
+		StreamID:     w.StreamID,
+		Text:         w.Text,
+		IsFinal:      w.IsFinal,
+		TsStart:      w.TsStart,
+		TsEnd:        w.TsEnd,
+		Confidence:   w.Confidence,
+		Language:     w.Language,
+		Seq:          w.Seq,
+		AudioPayload: w.AudioPayload,
+		AudioPT:      uint8(w.AudioPT), //nolint:gosec
 	}, nil
 }
 

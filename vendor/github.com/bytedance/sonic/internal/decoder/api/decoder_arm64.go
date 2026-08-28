@@ -1,3 +1,4 @@
+//go:build (go1.17 && !go1.27)
 // +build go1.17,!go1.27
 
 /*

@@ -92,6 +92,10 @@ type ServerConfig struct {
 	// MockResultPump bật giả lập ASR result 1s/lần sau khi nhận ctrl-result.
 	// Chỉ dùng cho môi trường test/lab; tắt trong production.
 	MockResultPump bool
+
+	// EgressQueueFrames là số frame tối đa buffered trong egress pacer per session.
+	// 0 → dùng mặc định 200 frame (4s tại 20ms/frame).
+	EgressQueueFrames int
 }
 
 // DefaultServerConfig trả về cấu hình mặc định (h2c, port 8080).
@@ -128,6 +132,14 @@ type Server struct {
 	grpcPool       *ai.SharedConnPool
 	callbackClient *result.CallbackHTTPClient
 	dcsfPool       *DCSFPool
+}
+
+// egressQueueFrames trả về số frame buffer cho egress pacer, mặc định 200 nếu không cấu hình.
+func (s *Server) egressQueueFrames() int {
+	if s.cfg.EgressQueueFrames > 0 {
+		return s.cfg.EgressQueueFrames
+	}
+	return 200
 }
 
 // SetRTPIngress wires shared Raw RTP ingress cho metric collection tại /metrics.

@@ -20,6 +20,7 @@ import (
 // Config cấu hình pipeline mỗi session.
 type Config struct {
 	JitterConfig    jitter.Config
+	JitterOutSize   int           // cap của channel jitterOut (jitter buffer → WorkerPool); default 16
 	OutSampleRate   int           // Hz sau resample (ví dụ: 16000)
 	OutChannels     int           // kênh đầu ra (thường 1 = mono)
 	ChunkMs         int           // độ dài AudioChunk gửi AI (ms)
@@ -33,9 +34,10 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		JitterConfig:    jitter.DefaultConfig(),
+		JitterOutSize:   16,
 		OutSampleRate:   16000,
 		OutChannels:     1,
-		ChunkMs:         500,
+		ChunkMs:         100,
 		CallbackTimeout: 5 * time.Second,
 		CallbackRetry:   3,
 	}
@@ -139,7 +141,11 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 //   - packet pump: PacketQueue → buf.Push + sess.Touch()
 //   - submit pump: jitterOut → pool.Submit (non-blocking, drop nếu pool queue đầy)
 func (c *Coordinator) startJitterPump(sess *session.Session) {
-	jitterOut := make(chan pipeline.MediaPacket, 16)
+	jitterOutSize := c.cfg.JitterOutSize
+	if jitterOutSize <= 0 {
+		jitterOutSize = 16
+	}
+	jitterOut := make(chan pipeline.MediaPacket, jitterOutSize)
 	buf := jitter.New(c.cfg.JitterConfig)
 
 	c.mu.Lock()
@@ -205,7 +211,14 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 				zap.String("language",   r.Language),
 				zap.Int64("ts_start",    r.TsStart),
 				zap.Int64("ts_end",      r.TsEnd),
+				zap.Int("audio_bytes",   len(r.AudioPayload)),
 			)
+			if len(r.AudioPayload) > 0 {
+				sess.SendRTP(r.AudioPayload) //nolint:errcheck // drop warning logged inside egress closure
+				// Strip audio trước khi đưa vào HTTP callback — MF đã nhận audio qua RTP egress.
+				r.AudioPayload = nil
+				r.AudioPT = 0
+			}
 			_ = c.dispatcher.Push(sess.Ctx, r)
 		}
 	}

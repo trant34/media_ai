@@ -64,17 +64,18 @@ session:
 
 # ── Audio pipeline & jitter buffer ────────────────────────────────────────────
 pipeline:
-  audio_worker_count: 16     # số goroutine trong worker pool xử lý audio
-  audio_job_queue_size: 8192 # kích thước queue job toàn cục của worker pool
+  audio_worker_count: 16     # unused — per-session goroutine model; giữ để tương thích config
+  audio_job_queue_size: 32   # per-session job queue (packet đang chờ pipeline goroutine)
   jitter_buffer_ms: 60       # độ trễ jitter buffer (ms)
   max_packet_late_ms: 120    # packet đến muộn hơn ngưỡng này bị drop (ms)
   packet_time_ms: 20         # kích thước gói RTP chuẩn (ms, dùng tính sequence)
+  jitter_out_queue_size: 16  # cap channel jitter buffer → WorkerPool
 
 # ── Audio output format ────────────────────────────────────────────────────────
 audio:
   output_sample_rate: 16000  # sample rate sau resample gửi AI (Hz)
   output_channels: 1         # số kênh output (1 = mono)
-  chunk_ms: 500              # kích thước chunk âm thanh gửi AI (ms)
+  chunk_ms: 100              # kích thước chunk âm thanh gửi AI (ms)
 
 # ── AI gRPC connection ─────────────────────────────────────────────────────────
 ai:
@@ -122,3 +123,13 @@ log:
   level: "info"    # debug | info | warn | error
   format: "json"   # json | text
   monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"media-ai-gateway/internal/pipeline"
 )
 
@@ -43,15 +45,22 @@ type Stream struct {
 	recvErrors      atomic.Uint64
 	endOfStreamSent atomic.Bool
 
+	// audioDropped: AudioChunk bị drop khi internal send queue (cap QueueSize) đầy.
+	audioDropped atomic.Uint64
+	// partialDropped: partial result (IsFinal=false) bị drop khi resultOut đầy.
+	partialDropped atomic.Uint64
+
 	// First-result latency: ms từ lúc stream mở đến khi nhận result đầu tiên.
 	firstResultMs atomic.Int64 // 0 = chưa nhận result nào
 }
 
 // StreamStats là snapshot counter của một Stream.
 type StreamStats struct {
-	SendErrors uint64
-	RecvErrors uint64
-	Retries    int
+	SendErrors     uint64
+	RecvErrors     uint64
+	Retries        int
+	AudioDropped   uint64 // AudioChunk bị drop do internal send queue đầy
+	PartialDropped uint64 // partial result bị drop do resultOut đầy
 
 	// FirstResultMs: ms từ stream open đến result đầu tiên; 0 nếu chưa có result.
 	FirstResultMs int64
@@ -63,10 +72,12 @@ func (s *Stream) Stats() StreamStats {
 	retries := s.retries
 	s.mu.Unlock()
 	return StreamStats{
-		SendErrors:    s.sendErrors.Load(),
-		RecvErrors:    s.recvErrors.Load(),
-		Retries:       retries,
-		FirstResultMs: s.firstResultMs.Load(),
+		SendErrors:     s.sendErrors.Load(),
+		RecvErrors:     s.recvErrors.Load(),
+		Retries:        retries,
+		AudioDropped:   s.audioDropped.Load(),
+		PartialDropped: s.partialDropped.Load(),
+		FirstResultMs:  s.firstResultMs.Load(),
 	}
 }
 
@@ -128,6 +139,9 @@ func (s *Stream) runWithReconnect(
 
 		pairErr := s.Err()
 		if pairErr == nil || s.cfg.MaxRetries == 0 {
+			return
+		}
+		if isPermanentGRPCError(pairErr) {
 			return
 		}
 
@@ -197,7 +211,8 @@ func (s *Stream) runPair(
 					}
 					select {
 					case q <- chunk:
-					default: // drop khi queue đầy
+					default:
+						s.audioDropped.Add(1)
 					}
 				}
 			}
@@ -231,19 +246,26 @@ func (s *Stream) runPair(
 // sendWithTimeout wraps client.Send với timeout nếu cfg.SendTimeout > 0.
 // Trả về context.DeadlineExceeded nếu hết timeout.
 func (s *Stream) sendWithTimeout(ctx context.Context, client StreamClient, chunk pipeline.AudioChunk) error {
-	if s.cfg.SendTimeout == 0 {
-		return client.Send(chunk)
-	}
 	type result struct{ err error }
 	ch := make(chan result, 1)
 	go func() {
 		ch <- result{client.Send(chunk)}
 	}()
+	if s.cfg.SendTimeout > 0 {
+		timer := time.NewTimer(s.cfg.SendTimeout)
+		defer timer.Stop()
+		select {
+		case r := <-ch:
+			return r.err
+		case <-timer.C:
+			return context.DeadlineExceeded
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	select {
 	case r := <-ch:
 		return r.err
-	case <-time.After(s.cfg.SendTimeout):
-		return context.DeadlineExceeded
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -308,10 +330,12 @@ func (s *Stream) recvWithTimeout(ctx context.Context, client StreamClient) (pipe
 		r, err := client.Recv()
 		ch <- result{r, err}
 	}()
+	timer := time.NewTimer(s.cfg.RecvIdleTimeout)
+	defer timer.Stop()
 	select {
 	case res := <-ch:
 		return res.r, res.err
-	case <-time.After(s.cfg.RecvIdleTimeout):
+	case <-timer.C:
 		return pipeline.RecognitionResult{}, ErrRecvIdleTimeout
 	case <-ctx.Done():
 		return pipeline.RecognitionResult{}, ctx.Err()
@@ -344,10 +368,15 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 		now := time.Now().UnixMilli()
 
 		// First-result latency (stream open → first result).
-		if s.firstResultMs.CompareAndSwap(0, now-s.OpenedAt.UnixMilli()) {
+		// Clamp to ≥1ms so 0 stays unambiguous as "no result yet".
+		latency := now - s.OpenedAt.UnixMilli()
+		if latency < 1 {
+			latency = 1
+		}
+		if s.firstResultMs.CompareAndSwap(0, latency) {
 			zap.L().Debug("ai: first result received",
 				zap.String("session_id", s.SessionID),
-				zap.Int64("first_result_ms", now-s.OpenedAt.UnixMilli()),
+				zap.Int64("first_result_ms", latency),
 			)
 		}
 
@@ -358,7 +387,10 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 			return
 		default:
 		}
-		if !r.IsFinal {
+		// Partial text-only result: drop khi queue đầy.
+		// Partial với AudioPayload: không drop — mất packet = gap âm thanh.
+		if !r.IsFinal && len(r.AudioPayload) == 0 {
+			s.partialDropped.Add(1)
 			continue
 		}
 		select {
@@ -371,4 +403,18 @@ func (s *Stream) runRecv(ctx context.Context, client StreamClient, resultOut cha
 
 func isCtxErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isPermanentGRPCError trả về true cho các gRPC status code không nên retry.
+func isPermanentGRPCError(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.NotFound,
+		codes.PermissionDenied, codes.Unauthenticated, codes.Unimplemented:
+		return true
+	}
+	return false
 }

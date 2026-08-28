@@ -4,9 +4,15 @@ import (
 	"runtime"
 
 	"media-ai-gateway/internal/ai"
-	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/session"
 )
+
+// poolQueue là interface tối thiểu mà AdmissionController cần từ WorkerPool.
+// *pipeline.WorkerPool implement interface này tự động.
+type poolQueue interface {
+	QueueLen() int
+	QueueCap() int
+}
 
 // AdmissionController kiểm tra gateway còn đủ tài nguyên để nhận session mới.
 //
@@ -19,7 +25,7 @@ import (
 //   - RTP port pool cạn         → retry sau 10s  (reason: "port_exhausted")
 type AdmissionController struct {
 	sessionMgr *session.Manager
-	pool       *pipeline.WorkerPool
+	pool       poolQueue
 	aiMgr      *ai.Manager
 	portAlloc  *PortAllocator
 
@@ -30,9 +36,10 @@ type AdmissionController struct {
 
 // NewAdmissionController tạo AdmissionController với các dependency cần kiểm tra.
 // portAlloc có thể nil nếu không dùng per-session port allocation.
+// pool chấp nhận *pipeline.WorkerPool hoặc bất kỳ type nào implement poolQueue.
 func NewAdmissionController(
 	sessionMgr *session.Manager,
-	pool *pipeline.WorkerPool,
+	pool poolQueue,
 	aiMgr *ai.Manager,
 	portAlloc *PortAllocator,
 ) *AdmissionController {
